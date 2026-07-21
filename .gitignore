@@ -1,0 +1,54 @@
+# NOTE: tests are intentionally NOT ignored. macos/Tests and the Rust tests in
+# agent-core/src are source, and contributors need them to verify changes.
+# Only generated artifacts and local-machine state belong below.
+
+# macOS
+.DS_Store
+._*
+.Spotlight-V100
+.Trashes
+
+# Swift Package Manager
+.build/
+.build-tests/
+.swiftpm/
+*.xcodeproj
+*.xcworkspace
+xcuserdata/
+DerivedData/
+*.dSYM/
+
+# Rust
+target/
+
+# Node
+node_modules/
+npm-debug.log*
+
+# Build output
+dist/
+
+# Local editor and tool state
+.claude/settings.local.json
+.vscode/
+.idea/
+
+# Scratch / temp files
+tmp/
+*.log
+.env
+.env.*
+
+# Working / handoff scratch docs
+HANDOFF.md
+HANDOFF*.md
+*.handoff.md
+
+# Superpowers-generated docs (specs, brainstorms, plans)
+docs/superpowers/
+
+# Legacy HTML/JS/CSS prototype (design reference only; not used by the native app)
+index.html
+styles.css
+app.js
+package.json

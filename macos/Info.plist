@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleDevelopmentRegion</key>
+	<string>en</string>
+	<key>CFBundleDisplayName</key>
+	<string>Agent Island</string>
+	<key>CFBundleExecutable</key>
+	<string>AgentIsland</string>
+	<key>CFBundleIconFile</key>
+	<string>AgentIsland</string>
+	<key>CFBundleIconName</key>
+	<string>AgentIsland</string>
+	<key>CFBundleIdentifier</key>
+	<string>com.xiao.agentisland</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>CFBundleName</key>
+	<string>Agent Island</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>2.2.10</string>
+	<key>CFBundleVersion</key>
+	<string>43</string>
+	<key>LSMinimumSystemVersion</key>
+	<string>14.0</string>
+	<key>LSUIElement</key>
+	<true/>
+	<key>NSAudioCaptureUsageDescription</key>
+	<string>Agent Island analyzes system audio locally to draw a music visualizer. Audio is never recorded, saved, or sent anywhere.</string>
+	<key>NSHighResolutionCapable</key>
+	<true/>
+	<key>NSSupportsAutomaticGraphicsSwitching</key>
+	<true/>
+</dict>
+</plist>
