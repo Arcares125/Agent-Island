@@ -21,6 +21,20 @@ enum AgentProvider: String, Codable, CaseIterable, Identifiable {
         case .claude: return "claude-mascot"
         }
     }
+
+    /// Grid the sprite is reduced to before being drawn back up as hard squares.
+    ///
+    /// The Claude artwork is already a 16-cell sprite, so it is resampled on a
+    /// multiple of that and comes back unchanged — only crisper, because the
+    /// smoothing that blurred its edges at small sizes is gone. The Codex pet is
+    /// a smooth 3D render with no grid of its own, so it needs a genuinely
+    /// coarse one to read as pixel art at all.
+    var pixelCells: Int {
+        switch self {
+        case .codex: return 26
+        case .claude: return 32
+        }
+    }
 }
 
 enum AgentPhase: String, Codable, CaseIterable, Identifiable {
@@ -129,6 +143,49 @@ struct PendingQuestionOption: Decodable, Equatable, Identifiable {
     let description: String?
 
     var id: String { label }
+}
+
+/// Which kind of line the sidecar just sent. Telemetry and answer traffic share
+/// one stream, so the envelope decides the decoder.
+struct MessageEnvelope: Decodable {
+    let type: String?
+}
+
+/// A question an agent is *blocked* on, delivered over the answer transport
+/// rather than scraped from the transcript.
+///
+/// The distinction from `pendingQuestion` matters: that one is a read-only echo
+/// of something already happening in a terminal, while this one is a live
+/// request the agent is holding open until the user picks or it times out.
+struct AskRequestMessage: Decodable, Equatable {
+    let requestId: String
+    let provider: AgentProvider?
+    let sessionId: String?
+    let cwd: String?
+    let question: PendingQuestion
+
+    /// The workspace the question came from, so a user with several sessions
+    /// open knows which one they are answering.
+    var workspaceName: String? {
+        guard let cwd, !cwd.isEmpty else { return nil }
+        let name = URL(fileURLWithPath: cwd).lastPathComponent
+        return name.isEmpty ? nil : name
+    }
+
+    /// Whether this question belongs to a given session row.
+    ///
+    /// Session id is authoritative, but a hook can fire before the sidecar has
+    /// discovered the transcript, so the workspace acts as a fallback rather
+    /// than letting the card fail to appear at all.
+    func matches(_ session: AgentSessionSnapshot) -> Bool {
+        if let sessionId, !sessionId.isEmpty, sessionId == session.id { return true }
+        if let cwd, !cwd.isEmpty, cwd == session.workspacePath { return true }
+        return false
+    }
+}
+
+struct AskResolvedMessage: Decodable {
+    let requestId: String
 }
 
 struct AgentSessionSnapshot: Decodable, Identifiable, Equatable {
@@ -247,6 +304,16 @@ final class IslandModel: ObservableObject {
     // audio-capture permission; the user must opt in from Settings.
     static let musicVisualizerEnabledKey = "musicVisualizerEnabled"
     static let defaultMusicVisualizerEnabled = false
+    // Answering from the island. Ships OFF because enabling it writes a hook
+    // into the user's Claude and Codex configuration — the app's only write
+    // outside its own container, so it must be a deliberate opt-in.
+    static let answerHookEnabledKey = "answerHookEnabled"
+    static let defaultAnswerHookEnabled = false
+    // Hiding the macOS volume HUD. Ships OFF because it needs Accessibility,
+    // which is the broadest permission the app can ask for — the user should
+    // grant it deliberately, for a cosmetic win, or not at all.
+    static let suppressSystemVolumeHUDKey = "suppressSystemVolumeHUD"
+    static let defaultSuppressSystemVolumeHUD = false
     /// Body height reserved for the volume HUD *below* the always-overlaid compact
     /// header — covers the "VOLUME" label, the mascot/bar row, the percent readout,
     /// and ExpandedIslandView's HUD padding, with margin.
@@ -254,7 +321,7 @@ final class IslandModel: ObservableObject {
     /// Fixed content heights for the non-list tabs, kept in sync with the tab
     /// views' own frames. The Agents tab sizes to its session list instead.
     static let shelfTabContentHeight: CGFloat = 114
-    static let settingsTabContentHeight: CGFloat = 152
+    static let settingsTabContentHeight: CGFloat = 228
     static let soundwaveStripHeight: CGFloat = 34
 
     private let defaults: UserDefaults
@@ -274,6 +341,14 @@ final class IslandModel: ObservableObject {
         }
         if defaults.object(forKey: Self.musicVisualizerEnabledKey) != nil {
             musicVisualizerEnabled = defaults.bool(forKey: Self.musicVisualizerEnabledKey)
+        }
+        if defaults.object(forKey: Self.suppressSystemVolumeHUDKey) != nil {
+            suppressSystemVolumeHUD = defaults.bool(forKey: Self.suppressSystemVolumeHUDKey)
+        }
+        // The agents' config files are the source of truth, not our default:
+        // the user may have removed the hook by hand since last launch.
+        answerHookEnabled = AgentHookInstaller.Target.allCases.contains {
+            AgentHookInstaller.isInstalled(target: $0)
         }
     }
 
@@ -295,6 +370,22 @@ final class IslandModel: ObservableObject {
     @Published var musicVisualizerEnabled: Bool = IslandModel.defaultMusicVisualizerEnabled {
         didSet { defaults.set(musicVisualizerEnabled, forKey: Self.musicVisualizerEnabledKey) }
     }
+    /// Mirrors what is actually in the agents' config files, not a preference we
+    /// hold independently of them.
+    @Published private(set) var answerHookEnabled = IslandModel.defaultAnswerHookEnabled
+    /// Surfaced next to the toggle when a config file could not be written.
+    @Published private(set) var answerHookError: String?
+    /// The prompt most recently answered from the island, used to suppress the
+    /// stale read-only card the transcript keeps reporting. Cleared once the
+    /// sidecar stops sending it.
+    @Published private(set) var answeredPrompt: String?
+    /// Mirrors whether the volume key tap is actually running, not merely what
+    /// the user asked for: without Accessibility the request cannot be honoured.
+    @Published private(set) var suppressSystemVolumeHUD = IslandModel.defaultSuppressSystemVolumeHUD
+    /// Shown under the toggle when the request could not be honoured.
+    @Published private(set) var volumeHUDError: String?
+    /// Set by `AppDelegate`, which owns the tap.
+    var volumeHUDSuppressionDidChange: ((Bool) -> Bool)?
     @Published private(set) var isAudioPlaying = false
     /// Deliberately not `@Published` on the model: bar values change ~30 times a
     /// second, which would invalidate every view observing `IslandModel`.
@@ -336,6 +427,11 @@ final class IslandModel: ObservableObject {
     @Published var reasoningEffort: String?
     @Published var latestPrompt: String?
     @Published var pendingQuestion: PendingQuestion?
+    /// The live, answerable question. An agent is blocked while this is set.
+    @Published private(set) var pendingAsk: AskRequestMessage?
+    /// Set by `AgentCoreClient`, so the model can deliver a pick without holding
+    /// the client. Keeps the dependency one-way and the model testable.
+    var answerHandler: ((String, Int?) -> Void)?
     @Published var sessions: [AgentSessionSnapshot] = []
     @Published var selectedSessionID: String?
     @Published var expandedSessionID: String?
@@ -361,7 +457,11 @@ final class IslandModel: ObservableObject {
     private var volumePeekTimer: Timer?
 
     var isExpanded: Bool {
-        isHovered || isPinnedOpen || isFileDragTargeted || isQuestionPeeking || isVolumePeeking
+        // A blocked agent holds the island open for as long as it waits. This is
+        // not a peek: the other flags all time out or follow the cursor, but
+        // nothing is going to happen here until the user actually answers.
+        isHovered || isPinnedOpen || isFileDragTargeted || isQuestionPeeking
+            || isVolumePeeking || pendingAsk != nil
     }
 
     /// The volume HUD takes over the expanded panel only while its transient peek
@@ -676,6 +776,47 @@ final class IslandModel: ObservableObject {
         visualizerEnabledDidChange?(value)
     }
 
+    /// Turn the macOS volume HUD suppression on or off.
+    ///
+    /// The stored value is what the tap reports, not what was asked for: if
+    /// Accessibility has not been granted the tap cannot start, and showing the
+    /// switch as on would be a lie the user then has to debug.
+    func setSuppressSystemVolumeHUD(_ value: Bool) {
+        guard suppressSystemVolumeHUD != value else { return }
+        let running = volumeHUDSuppressionDidChange?(value) ?? false
+
+        suppressSystemVolumeHUD = running
+        defaults.set(running, forKey: Self.suppressSystemVolumeHUDKey)
+        volumeHUDError = (value && !running)
+            ? "Needs Accessibility — grant it in System Settings, then try again"
+            : nil
+    }
+
+    /// Write (or remove) the hook in every agent's configuration.
+    ///
+    /// A failure on one agent does not abort the other: having the hook in
+    /// Claude but not Codex is a coherent state, and reporting it beats silently
+    /// leaving both untouched.
+    func setAnswerHookEnabled(_ value: Bool) {
+        guard answerHookEnabled != value else { return }
+        var failures: [String] = []
+
+        for target in AgentHookInstaller.Target.allCases {
+            do {
+                try AgentHookInstaller.setInstalled(value, target: target)
+            } catch {
+                failures.append(target.displayName)
+            }
+        }
+
+        answerHookEnabled = AgentHookInstaller.Target.allCases.contains {
+            AgentHookInstaller.isInstalled(target: $0)
+        }
+        answerHookError = failures.isEmpty
+            ? nil
+            : "Could not update \(failures.joined(separator: " and ")) config"
+    }
+
     func setPhase(_ nextPhase: AgentPhase, manual: Bool = true) {
         if manual { monitoringEnabled = false }
         let wasQuestion = phase == .question
@@ -844,6 +985,20 @@ final class IslandModel: ObservableObject {
             changedFiles = snapshot.changedFiles ?? []
         }
 
+        // A hook can fire before the sidecar has discovered the transcript, so the
+        // reveal is retried until the session it belongs to actually exists.
+        if let ask = pendingAsk, !sessions.contains(where: { $0.id == expandedSessionID }) {
+            revealAsk(ask)
+        }
+
+        // Release the suppression once the transcript has caught up, so a genuinely
+        // new question with the same wording is never swallowed.
+        if let answeredPrompt,
+           !sessions.contains(where: { $0.pendingQuestion?.prompt == answeredPrompt }),
+           pendingQuestion?.prompt != answeredPrompt {
+            self.answeredPrompt = nil
+        }
+
         // Auto-open only on the transition into a question, never on the repeated
         // snapshots of a still-pending one — otherwise the panel re-locks forever.
         let announcedNewQuestion = newlyActionableSession != nil
@@ -922,5 +1077,74 @@ extension IslandModel: AudioMonitoringDelegate {
 
     func spectrumDidUpdate(_ bars: [Float]) {
         spectrumStore.update(bars)
+    }
+
+    // MARK: - Answering a blocked agent
+
+    /// A question with no options cannot be answered from the island, so it is
+    /// dropped rather than shown as a card with nothing to click.
+    func presentAsk(_ ask: AskRequestMessage) {
+        guard !ask.question.options.isEmpty else { return }
+        pendingAsk = ask
+        // The agent is blocked from this moment, so open the island now rather
+        // than waiting for the next telemetry snapshot to notice.
+        endQuestionPeek()
+        revealAsk(ask)
+        layoutDidChange?()
+    }
+
+    /// Put the question in front of the user without them hunting for it: the
+    /// card lives inside a session's inspector, which is collapsed by default, so
+    /// a blocked agent has to open its own row and pull the Agents tab forward.
+    private func revealAsk(_ ask: AskRequestMessage) {
+        selectedTab = .agents
+        guard let match = sessions.first(where: { ask.matches($0) }) else { return }
+        expandedSessionID = match.id
+        selectedSessionID = match.id
+    }
+
+    /// Retire the card once the sidecar says the request is over — answered here,
+    /// answered in the terminal, or timed out. Scoped by id so a stale resolve
+    /// cannot dismiss a newer question.
+    func retireAsk(requestId: String) {
+        guard pendingAsk?.requestId == requestId else { return }
+        pendingAsk = nil
+        layoutDidChange?()
+    }
+
+    /// Deliver the user's pick.
+    ///
+    /// The index is validated against the option list the *agent* supplied, so
+    /// the island can only ever return one of the agent's own choices. This is
+    /// the boundary that keeps a write channel from becoming a way to inject
+    /// arbitrary text into a coding agent's context.
+    func answerAsk(optionIndex: Int) {
+        guard let ask = pendingAsk,
+              ask.question.options.indices.contains(optionIndex) else { return }
+        answerHandler?(ask.requestId, optionIndex)
+        finishAsk(ask)
+    }
+
+    /// Hand the question back to the terminal without answering it.
+    func dismissAsk() {
+        guard let ask = pendingAsk else { return }
+        answerHandler?(ask.requestId, nil)
+        finishAsk(ask)
+    }
+
+    private func finishAsk(_ ask: AskRequestMessage) {
+        answeredPrompt = ask.question.prompt
+        pendingAsk = nil
+        layoutDidChange?()
+    }
+
+    /// Whether the transcript-scraped card for this question should stay hidden.
+    ///
+    /// The sidecar keeps reporting a question until the agent's next turn is
+    /// written to the transcript, which lags the answer by seconds. Without this
+    /// the read-only card pops back the instant the answerable one closes, and
+    /// the user is told to go answer something they just answered.
+    func isAlreadyAnswered(_ question: PendingQuestion) -> Bool {
+        question.prompt == answeredPrompt
     }
 }

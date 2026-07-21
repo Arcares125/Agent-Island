@@ -11,7 +11,7 @@
 </p>
 
 <p align="center">
-  macOS 14+ · Native SwiftUI/AppKit · Dependency-free Rust helper · Local-first · Version 2.2.10 (build 43)
+  macOS 14+ · Native SwiftUI/AppKit · Dependency-free Rust helper · Local-first · Version 2.3.0 (build 51)
 </p>
 
 ---
@@ -34,7 +34,8 @@ The production application is fully native:
 | --- | --- |
 | Physical notch | Measures the current display's real safe areas and visually fuses a true-black surface with the camera housing. |
 | Smooth interaction | Hovering the notch expands the panel downward while the header and top edge remain fixed. |
-| Living mascots | Codex and Claude mascots use state-specific gestures for idle, thinking, needs-input, and complete. |
+| Answer from the island | When an agent asks a multiple-choice question, the island opens itself and you click the answer. The agent stays blocked until you do. Opt-in; see [Answering a blocked agent](#answering-a-blocked-agent). |
+| Living mascots | Codex and Claude mascots use state-specific gestures for idle, thinking, needs-input, and complete, drawn as hard pixel sprites with pixel expression badges. |
 | Recent-agent cluster | Shows up to three recent mascots: a 20-point animated primary followed by static 14- and 12-point mascots. |
 | Multi-session dashboard | Tracks up to eight recent/live transcript sessions and lets you select a stable individual session. |
 | Provider fairness | Reserves up to three tracked slots for each detected provider before filling remaining slots by recency. |
@@ -48,7 +49,8 @@ The production application is fully native:
 | One-hour file shelf | Holds up to nine dropped files as cards — real Finder icon, name, type and size — for quick paste/drag reuse, then deletes the copies automatically. |
 | Music visualizer | Optional five-bar chromatic equalizer in the notch's right wing, driven by a real FFT of system audio. Off by default; costs nothing when off or silent. |
 | Volume tug-of-war | Changing system volume briefly pops the island open with the Codex and Claude mascots tugging a level bar toward whoever "won" the last change. |
-| In-island settings | A Settings tab for hover open/close timing and the two media toggles, persisted in `UserDefaults`. |
+| One volume overlay | Optionally suppresses the macOS volume HUD so only the island's is on screen. Needs Accessibility; off by default. |
+| In-island settings | A scrolling Settings tab for hover timing, the media toggles, answering, and HUD suppression, persisted in `UserDefaults`. |
 | Recognizable app icon | Combines the Codex and Claude mascots in one dark purple/orange macOS icon for Finder, Applications, Activity Monitor, notifications, and system UI. |
 | Full-screen mode | Hides the floating island over games/full-screen apps, keeps a menu-bar status icon, and posts native completion/input notifications. |
 | Native efficiency | Uses finite transitions, long mascot rest periods, cached images, bounded readers, and event-driven full-screen checks. |
@@ -220,7 +222,7 @@ The menu-bar menu includes:
 
 Keyboard equivalents shown in the menu include `I` for show/hide, `P` for pin, `A` for automatic detection, and `Q` for quit.
 
-The expanded dashboard's **Settings** tab holds hover open/close timing presets and the two media toggles. All of it persists in `UserDefaults`.
+The expanded dashboard's **Settings** tab holds hover open/close timing presets, the two media toggles, answering from the island, and volume HUD suppression. The panel scrolls, so later additions cannot clip earlier ones. All of it persists in `UserDefaults`.
 
 ## Permissions
 
@@ -230,11 +232,15 @@ Agent Island asks for as little as it can. Everything below is optional; the cor
 | --- | --- | --- |
 | Notifications | Completion and needs-input alerts while another app is full-screen. | System Settings → Notifications → Agent Island |
 | System audio capture | The music visualizer only. Never requested unless you enable that toggle. | System Settings → Privacy & Security → Screen & System Audio Recording |
+| Accessibility | Suppressing the macOS volume HUD only. Never requested unless you enable that toggle. | System Settings → Privacy & Security → Accessibility |
 
-Agent Island requests **no** camera, microphone, contacts, calendar, location, Full Disk Access, or Accessibility permission, and makes no network request of any kind.
+Agent Island requests **no** camera, microphone, contacts, calendar, location, or Full Disk Access permission, and makes no network request of any kind.
+
+> [!WARNING]
+> Accessibility is the broadest permission here: it allows an event tap that can observe and suppress input. Agent Island uses it for exactly one thing — swallowing the volume keys so macOS does not draw its overlay on top of the island's — and the tap only ever consumes a key **after** the volume change has already been applied. Every other key, including brightness and playback, passes through untouched. Grant it only if the duplicate volume overlay bothers you; nothing else in the app depends on it. The tap dies with the process, so quitting restores normal behaviour instantly.
 
 > [!NOTE]
-> A locally built app is **ad-hoc signed**, and macOS only reliably lists and remembers system-audio capture for apps with a stable code-signing identity. If the visualizer bars stay flat, check the Screen & System Audio Recording pane; if the app is missing there or the grant does not survive a rebuild, sign your build with a self-signed certificate (`security create-keychain` + a code-signing identity) and rebuild.
+> macOS ties permission grants to an app's **code signature**. A default ad-hoc build gets a new signature every time it is rebuilt, so every rebuild revokes whatever you granted. Run `scripts/make-signing-cert.sh` once to create a local code-signing identity; `build-app.sh` picks it up automatically and grants then persist. See [Local code signing](#local-code-signing).
 
 ## Supported session sources
 
@@ -348,6 +354,62 @@ Each dropped file becomes a card showing its **real Finder icon** (a PDF looks l
 
 The shelf does not upload files, index their contents, or add them to agent transcripts.
 
+## Answering a blocked agent
+
+Agent Island was observe-only for most of its life. It now has exactly one write path: when an agent asks a multiple-choice question, you can answer it from the island instead of switching to the terminal. This section describes that path precisely, because it is the only part of the app that can affect an agent.
+
+Enable it under **Settings → ANSWER FROM ISLAND**. It ships **off**.
+
+### How it works
+
+Both Claude Code and Codex support **hooks** — commands the agent runs at defined points, whose output the agent reads back. A hook is a subprocess that blocks, and that property is what makes answering possible at all:
+
+```text
+agent asks a question
+  └─ PreToolUse hook runs `agent-core --ask-hook`
+       └─ connects to the island's Unix socket, sends the question, blocks
+            └─ island opens itself and renders the choices
+                 └─ you click one
+                      └─ helper prints the verdict; the agent reads it and continues
+```
+
+Turning the toggle on writes a hook entry into your agent configuration:
+
+| Agent | File | Event | Tool matched |
+| --- | --- | --- | --- |
+| Claude Code | `~/.claude/settings.json` (and `~/.claude2/settings.json` if present) | `PreToolUse` | `AskUserQuestion` |
+| Codex | `~/.codex/hooks/hooks.json` | `pre_tool_use` | `request_user_input` |
+
+These are **your** files, so the installer merges rather than replaces: existing settings and third-party hooks are preserved, a `.agentisland-backup` copy is taken before the first edit, and turning the toggle off removes the entry along with any container it leaves empty. Entries are identified only by the `--ask-hook` argument, so a hook you wrote yourself is never touched.
+
+### Why this is not a general write channel
+
+The island can only ever return an **index into the option list the agent itself wrote**. It never supplies text.
+
+- The label placed in the verdict is read back out of the agent's own payload, so a compromised island could at worst pick a *different one of the agent's own choices*.
+- The index is validated against that option list before it travels anywhere; an out-of-range value is discarded.
+- There is no free-text field, and no way to compose an instruction.
+
+### Failure behaviour
+
+Every failure path is silent and non-blocking, so the agent falls through to its own terminal prompt exactly as if the feature did not exist:
+
+- island not running, or socket missing → helper exits immediately, agent prompts normally;
+- no answer within **110 seconds** → helper releases the agent;
+- malformed payload, or a question with no options → helper stays out of the way;
+- **Answer in terminal instead** in the card → releases the agent immediately.
+
+### Transport security
+
+- The socket lives at `~/Library/Application Support/AgentIsland/ask.sock`, mode `0600` inside a mode `0700` directory.
+- Every connection is checked with `getpeereid`; a peer whose UID is not yours is dropped.
+- A Unix domain socket is a filesystem object with no network stack behind it. It cannot be reached from another machine.
+- The helper forwards only four fields — provider, session id, working directory, and the question with its options. The transcript path present in the hook payload is never sent.
+- Request payloads are bounded at 64 KB and concurrent questions at eight.
+
+> [!NOTE]
+> Claude Code delivers a hook's reason to the model through its `deny` decision, which is the only `PreToolUse` outcome the model actually reads. The terminal therefore prints `Error:` before your answer even though nothing failed. The wording of the verdict compensates for this, and the model acts on the choice correctly.
+
 ## Media features
 
 Two optional flourishes live under the island's **Settings** tab. Both are pure Swift on top of Apple's own frameworks (Core Audio, Accelerate, AppKit) and add no dependency.
@@ -424,8 +486,13 @@ Agent Island reads local session metadata because that is its core function, but
 
 ### Security design
 
-- The Rust helper makes no network requests.
+- Neither the app nor the Rust helper makes any network request. There is no networking code in either target, and neither process opens a TCP or UDP socket at runtime.
 - Swift and Rust production targets have no third-party dependencies.
+- The app is built with the **hardened runtime** and declares **no entitlements** at all.
+- The only write path into an agent is the opt-in answer transport, which can return an index into the agent's own option list and nothing else. See [Answering a blocked agent](#answering-a-blocked-agent).
+- The only files written outside the app's own container are the agent hook entries, added on an explicit opt-in, backed up first, and fully removed when the toggle is turned off.
+- The answer socket is mode `0600` in a mode `0700` directory and verifies the connecting process's UID with `getpeereid`.
+- The optional volume-key tap consumes an event only after the corresponding volume change has succeeded, passes every non-volume key through untouched, refuses to start without Accessibility, and re-arms itself if macOS disables it.
 - Transcript reads, pending lines, activity lists, changed files, session counts, prompt length, and Swift pipe buffers are bounded.
 - The temporary shelf accepts only regular non-symlink files, caps them at nine items and 1 GB each, stores copies in a mode-700 temporary directory, and never removes originals.
 - The packaged app resolves only its bundled signed helper; it will not substitute an executable from the current working directory.
@@ -537,11 +604,20 @@ A one-time `leaks` scan reported zero leaked bytes for the Rust helper. macOS re
 
 Agent Island is functional, but several integrations require provider support that is not yet available.
 
-### No real question-answer transport yet
+### Answering only covers multiple-choice questions
 
-Needs-input detection is real. The app can focus the relevant row and notify you, but it cannot safely submit an answer back to the exact Codex or Claude session without supported provider-specific IPC.
+The answer transport handles `AskUserQuestion` (Claude Code) and `request_user_input` (Codex) — questions where the agent supplied a fixed list of options. It deliberately cannot answer anything else: there is no free-text path, and permission prompts ("may I run this command?") are not intercepted.
 
-Manual-preview answer choices demonstrate the intended interface only. They must not be described as controlling a real session.
+Two further constraints are worth knowing:
+
+- **Hooks are read when a session starts.** Enabling the toggle does not affect sessions that are already running; they keep prompting in their terminal until restarted.
+- **Codex is unverified end to end.** The hook file is written and its schema matches what the Codex binary declares, but the path has not been observed firing in practice. Claude Code is the tested one.
+
+Without the toggle enabled, the older read-only behaviour still applies: the island shows the question and tells you to answer in the terminal.
+
+### Session liveness is inferred, not reported
+
+A transcript outlives the process that wrote it, and nothing is appended when a session is closed without answering. A pending question is therefore retired when no agent process for that provider is running, or after five minutes without transcript activity — whichever comes first. Process detection is per *provider*, not per session, so closing one of two Claude sessions falls back to the timer.
 
 ### No exact original IDE or terminal focus
 
@@ -648,10 +724,29 @@ The current suite covers:
 DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer swift test
 ```
 
-49 unit tests cover the island model's state machine, hover/expand geometry, volume tug-of-war routing, spectrum math and smoothing, shelf formatting, and the temporary file shelf's lifecycle.
+121 unit tests cover the island model's state machine, hover/expand geometry, volume tug-of-war routing, spectrum math and smoothing, shelf formatting, the temporary file shelf's lifecycle, the answer transport's validation boundary, hook config merging and removal, pixel glyph bitmaps, and the volume key decoder.
 
 > [!TIP]
 > `DEVELOPER_DIR` is required when `xcode-select -p` points at the Command Line Tools, which ship no XCTest. If `swift test` reports `no such module 'XCTest'`, that is the cause.
+
+### Local code signing
+
+Optional, and only useful to developers. macOS ties permission grants — Accessibility, system audio capture — to an app's code signature. A default **ad-hoc** build gets a fresh signature on every rebuild, so every rebuild revokes whatever you granted.
+
+```bash
+zsh scripts/make-signing-cert.sh
+```
+
+This creates a self-signed identity named `Agent Island Local` in your login keychain. `build-app.sh` detects it automatically and falls back to ad-hoc when it is absent, so contributors without it still get a working build.
+
+The certificate is deliberately narrow: `CA:FALSE` with **Code Signing** as its only extended key usage, so it cannot issue other certificates and cannot be used for TLS. The private key is imported with access limited to `/usr/bin/codesign` rather than to all applications, and nothing is added to the system trust store. To remove it:
+
+```bash
+security delete-certificate -c "Agent Island Local"
+```
+
+> [!IMPORTANT]
+> This is **not** for distribution. The result is not notarized and Gatekeeper will still refuse it on other machines. Public distribution needs an Apple Developer ID and notarization; see [Limitations](#local-build-distribution).
 
 ### Production build
 
@@ -665,7 +760,9 @@ zsh scripts/build-app.sh
 dynamic_island/
 ├── agent-core/
 │   ├── Cargo.toml
-│   └── src/main.rs
+│   └── src/
+│       ├── main.rs                      # process scan, transcript tailing, snapshots
+│       └── ask.rs                       # answer socket + `--ask-hook` helper
 ├── assets/
 │   ├── agent-island-app-icon.png
 │   ├── codex-pet-transparent.png
@@ -679,6 +776,11 @@ dynamic_island/
 │   │   ├── ClaudeMetricsBridge.swift    # optional local status-line bridge
 │   │   ├── IslandModel.swift            # state machine + derived layout
 │   │   ├── IslandViews.swift            # island, dashboard, shelf, settings
+│   │   ├── AnswerCard.swift             # answerable question card + pixel digit
+│   │   ├── ScrambleBand.swift           # interference-band maths for the digit
+│   │   ├── HookInstaller.swift          # merges/removes the agent hook entries
+│   │   ├── PixelGlyph.swift             # bitmap expression badges
+│   │   ├── VolumeKeyTap.swift           # optional macOS volume HUD suppression
 │   │   ├── AudioMonitor.swift           # volume + playback detection + process tap
 │   │   ├── AudioRingBuffer.swift        # lock-guarded HAL-thread buffer
 │   │   ├── SpectrumAnalyzer.swift       # reusable vDSP real-FFT
@@ -689,10 +791,11 @@ dynamic_island/
 │   │   ├── ShelfFormatting.swift        # size and type labels
 │   │   ├── TemporaryFileShelf.swift     # one-hour file shelf store
 │   │   └── Resources/
-│   └── Tests/AgentIslandTests/          # 49 unit tests
+│   └── Tests/AgentIslandTests/          # 121 unit tests
 ├── scripts/
 │   ├── build-app.sh
 │   ├── make-app-icon.swift
+│   ├── make-signing-cert.sh             # optional stable local signing identity
 │   └── run-app.sh
 ├── Package.swift
 ├── LICENSE
@@ -714,8 +817,8 @@ Every installed build also increments `CFBundleVersion`.
 Current release:
 
 ```text
-CFBundleShortVersionString = 2.2.10
-CFBundleVersion = 43
+CFBundleShortVersionString = 2.3.0
+CFBundleVersion = 51
 ```
 
 ## Design principles

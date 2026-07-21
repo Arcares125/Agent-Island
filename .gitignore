@@ -28,6 +28,14 @@ npm-debug.log*
 # Build output
 dist/
 
+# Signing material. The local identity lives in the login keychain and never in
+# the repo, but a stray export must not be committable by accident.
+*.p12
+*.pem
+*.key
+*.pfx
+*.certSigningRequest
+
 # Local editor and tool state
 .claude/settings.local.json
 .vscode/
