@@ -2,10 +2,10 @@
 //! blocked on a question.
 //!
 //! The agent's `PreToolUse` hook runs `agent-core --ask-hook`, which connects to
-//! the island's Unix socket, hands over the question, and blocks. The island
-//! renders the card; the user's pick travels back down the same connection; the
-//! helper prints the hook verdict carrying the chosen label, and the agent
-//! continues.
+//! the island over a local, owner-only channel — a Unix socket on macOS, a named
+//! pipe on Windows — hands over the question, and blocks. The island renders the
+//! card; the user's pick travels back down the same connection; the helper prints
+//! the hook verdict carrying the chosen label, and the agent continues.
 //!
 //! Two properties keep this from becoming a general write channel into the
 //! agent, which is the whole reason the app was observe-only until now:
@@ -18,12 +18,9 @@
 //!    answer in time, malformed anything — so the agent falls through to its own
 //!    terminal prompt exactly as if this feature did not exist.
 
+use crate::platform::ipc::{AskListener, AskStream};
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Read, Write};
-use std::os::unix::fs::PermissionsExt;
-use std::os::unix::io::AsRawFd;
-use std::os::unix::net::{UnixListener, UnixStream};
-use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex};
@@ -41,30 +38,6 @@ const SOCKET_IO_TIMEOUT: Duration = Duration::from_secs(5);
 /// More simultaneous blocked agents than this is pathological; refuse rather,
 /// than let the pending map grow without bound.
 const MAX_CONCURRENT_ASKS: usize = 8;
-
-/// `getpeereid` is the macOS way to learn who is on the other end of a Unix
-/// socket. Declared by hand because the project takes no third-party crates.
-mod ffi {
-    use std::os::raw::c_int;
-
-    unsafe extern "C" {
-        pub fn getpeereid(fd: c_int, euid: *mut u32, egid: *mut u32) -> c_int;
-        pub fn geteuid() -> u32;
-    }
-}
-
-/// The socket lives under Application Support rather than a temp dir so it is
-/// not world-traversable and does not evaporate on reboot cleanup.
-pub fn socket_path() -> Option<PathBuf> {
-    let home = std::env::var_os("HOME")?;
-    Some(
-        PathBuf::from(home)
-            .join("Library")
-            .join("Application Support")
-            .join("AgentIsland")
-            .join("ask.sock"),
-    )
-}
 
 // ───────────────────────────── helper side ─────────────────────────────
 
@@ -102,18 +75,19 @@ pub fn run_hook_helper() -> i32 {
 /// Connect, hand over the question, block for the pick. `None` for every
 /// failure, which the caller turns into "let the terminal handle it".
 fn request_answer(payload: &str, question: &crate::PendingQuestion) -> Option<usize> {
-    let path = socket_path()?;
-    let stream = UnixStream::connect(path).ok()?;
-    stream.set_read_timeout(Some(ANSWER_TIMEOUT)).ok()?;
-    stream.set_write_timeout(Some(SOCKET_IO_TIMEOUT)).ok()?;
+    let mut stream = AskStream::connect()?;
+    if !stream.set_write_timeout(SOCKET_IO_TIMEOUT) || !stream.set_read_timeout(ANSWER_TIMEOUT) {
+        return None;
+    }
 
-    let mut writer = stream.try_clone().ok()?;
-    writer.write_all(ask_request_json(payload, question).as_bytes()).ok()?;
-    writer.write_all(b"\n").ok()?;
-    writer.flush().ok()?;
+    stream
+        .write_all(ask_request_json(payload, question).as_bytes())
+        .ok()?;
+    stream.write_all(b"\n").ok()?;
+    stream.flush().ok()?;
 
     let mut line = String::new();
-    BufReader::new(stream).read_line(&mut line).ok()?;
+    BufReader::new(&mut stream).read_line(&mut line).ok()?;
     parse_answer_index(&line)
 }
 
@@ -205,52 +179,37 @@ impl AskRegistry {
     }
 }
 
-/// Bind the socket and serve forever on a background thread.
+/// Claim the answer endpoint and serve forever on a background thread.
 ///
-/// Returns `None` when the socket cannot be bound — another island already owns
-/// it, or the directory is not writable. The sidecar keeps reporting telemetry
-/// either way; only answering is lost.
+/// Returns `None` when it cannot be claimed — another island already owns it, or
+/// the location is not writable. The sidecar keeps reporting telemetry either
+/// way; only answering is lost.
 pub fn serve() -> Option<Arc<AskRegistry>> {
-    let path = socket_path()?;
-    let directory = path.parent()?.to_path_buf();
-    std::fs::create_dir_all(&directory).ok()?;
-    // Owner-only: nobody else on a shared Mac may enumerate or connect.
-    let _ = std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700));
-
-    // A socket left behind by a crashed island would block the bind.
-    if path.exists() {
-        if UnixStream::connect(&path).is_ok() {
-            return None; // A live island already owns it.
-        }
-        let _ = std::fs::remove_file(&path);
-    }
-
-    let listener = UnixListener::bind(&path).ok()?;
-    let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
-
+    let listener = AskListener::bind()?;
     let registry = Arc::new(AskRegistry::new());
     let accept_registry = Arc::clone(&registry);
     thread::spawn(move || accept_loop(listener, accept_registry));
     Some(registry)
 }
 
-fn accept_loop(listener: UnixListener, registry: Arc<AskRegistry>) {
-    for stream in listener.incoming().flatten() {
+fn accept_loop(mut listener: AskListener, registry: Arc<AskRegistry>) {
+    while let Some(stream) = listener.accept() {
         let registry = Arc::clone(&registry);
         thread::spawn(move || handle_connection(stream, &registry));
     }
 }
 
-fn handle_connection(stream: UnixStream, registry: &AskRegistry) {
-    // File permissions already restrict this, but a peer check is what actually
-    // proves the caller is us rather than something that inherited the fd.
-    if !peer_is_current_user(&stream) {
+fn handle_connection(mut stream: AskStream, registry: &AskRegistry) {
+    // The endpoint's own access control already restricts this, but a peer check
+    // is what actually proves the caller is us rather than something that
+    // inherited the handle.
+    if !stream.peer_is_current_user() {
         return;
     }
-    let _ = stream.set_read_timeout(Some(SOCKET_IO_TIMEOUT));
-    let _ = stream.set_write_timeout(Some(SOCKET_IO_TIMEOUT));
+    stream.set_read_timeout(SOCKET_IO_TIMEOUT);
+    stream.set_write_timeout(SOCKET_IO_TIMEOUT);
 
-    let Some(request) = read_request_line(&stream) else {
+    let Some(request) = read_request_line(&mut stream) else {
         return;
     };
 
@@ -285,7 +244,6 @@ fn handle_connection(stream: UnixStream, registry: &AskRegistry) {
         crate::escape_json(&request_id)
     );
 
-    let mut stream = stream;
     let _ = stream.write_all(answer_json(answer).as_bytes());
     let _ = stream.write_all(b"\n");
     let _ = stream.flush();
@@ -321,18 +279,11 @@ fn answer_json(index: Option<usize>) -> String {
     )
 }
 
-fn read_request_line(stream: &UnixStream) -> Option<String> {
+fn read_request_line(stream: &mut AskStream) -> Option<String> {
     let mut line = String::new();
-    let mut reader = BufReader::new(stream.try_clone().ok()?).take(MAX_REQUEST_BYTES as u64);
+    let mut reader = BufReader::new(stream).take(MAX_REQUEST_BYTES as u64);
     reader.read_line(&mut line).ok()?;
     (!line.trim().is_empty()).then_some(line)
-}
-
-fn peer_is_current_user(stream: &UnixStream) -> bool {
-    let mut uid = 0_u32;
-    let mut gid = 0_u32;
-    let result = unsafe { ffi::getpeereid(stream.as_raw_fd(), &mut uid, &mut gid) };
-    result == 0 && uid == unsafe { ffi::geteuid() }
 }
 
 /// Parse `{"type":"answer","requestId":"…","optionIndex":N}` off the app's stdin.

@@ -1,10 +1,11 @@
 mod ask;
+mod platform;
 
+use platform::scan_processes;
 use std::collections::HashMap;
 use std::fs::{self, File};
 use std::io::{BufRead, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::thread;
 use std::time::{Duration, Instant, SystemTime};
 
@@ -637,69 +638,6 @@ fn main() {
     }
 }
 
-fn scan_processes() -> Vec<DetectedAgent> {
-    let Ok(output) = Command::new("/bin/ps")
-        .args(["-axo", "pid=,command="])
-        .output()
-    else {
-        return Vec::new();
-    };
-
-    let process_list = String::from_utf8_lossy(&output.stdout);
-    let mut agents = process_list
-        .lines()
-        .filter_map(parse_process_line)
-        .collect::<Vec<_>>();
-    agents.sort_by_key(|agent| agent.pid);
-    agents
-}
-
-fn parse_process_line(line: &str) -> Option<DetectedAgent> {
-    let trimmed = line.trim();
-    let split_at = trimmed.find(char::is_whitespace)?;
-    let pid = trimmed[..split_at].parse::<u32>().ok()?;
-    if pid == std::process::id() {
-        return None;
-    }
-
-    let command = trimmed[split_at..].trim();
-    // `ps` does not quote executable paths containing spaces. Without this
-    // guard, paths such as ".../Frameworks/Codex Framework.framework/..."
-    // look like an executable named Codex after whitespace splitting.
-    if command.contains("/Contents/Frameworks/") || command.contains(".app/Contents/MacOS/") {
-        return None;
-    }
-    let mut command_parts = command.split_whitespace();
-    let executable = command_parts.next()?;
-    let executable_name = executable.rsplit('/').next()?.to_ascii_lowercase();
-    let first_argument = command_parts.next();
-
-    let provider = match executable_name.as_str() {
-        "codex" => {
-            // A Codex session may own sandbox workers. They are implementation
-            // details of one session and must never inflate the session count.
-            if first_argument == Some("sandbox") {
-                return None;
-            }
-            "codex"
-        }
-        "claude" => {
-            // Claude keeps daemons and spare PTY hosts around. Count interactive
-            // processes, not those background helpers.
-            if matches!(first_argument, Some("daemon" | "bg-pty-host" | "bg-spare"))
-                || command.contains(" --bg-pty-host ")
-                || command.contains(" --bg-spare ")
-            {
-                return None;
-            }
-            "claude"
-        }
-        _ => return None,
-    };
-
-    Some(DetectedAgent { provider, pid })
-}
-
 fn emit_snapshot(
     agent: Option<&DetectedAgent>,
     elapsed_seconds: u64,
@@ -1046,13 +984,7 @@ fn ingest_claude_status() {
 }
 
 fn claude_cache_path() -> Option<PathBuf> {
-    let home = std::env::var_os("HOME").map(PathBuf::from)?;
-    Some(
-        home.join("Library")
-            .join("Caches")
-            .join("com.agentisland.AgentIsland")
-            .join("claude-usage.json"),
-    )
+    Some(platform::cache_dir()?.join("claude-usage.json"))
 }
 
 fn write_claude_cache(usage: &UsageTelemetry) -> std::io::Result<()> {
@@ -1115,7 +1047,7 @@ fn telemetry_roots_for_home(provider: &str, home: &Path) -> Vec<PathBuf> {
 }
 
 fn collect_provider_candidates(provider: &'static str, candidates: &mut Vec<SessionCandidate>) {
-    let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
+    let Some(home) = platform::home_dir() else {
         return;
     };
     let max_depth = if provider == "codex" { 5 } else { 4 };
@@ -2095,28 +2027,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn detects_codex_cli() {
-        assert_eq!(
-            parse_process_line("  123 /opt/homebrew/bin/codex --profile work"),
-            Some(DetectedAgent {
-                provider: "codex",
-                pid: 123
-            })
-        );
-    }
-
-    #[test]
-    fn detects_claude_cli() {
-        assert_eq!(
-            parse_process_line("456 /Users/test/.local/bin/claude"),
-            Some(DetectedAgent {
-                provider: "claude",
-                pid: 456
-            })
-        );
-    }
-
-    #[test]
     fn discovers_primary_and_secondary_claude_profile_roots() {
         assert_eq!(
             telemetry_roots_for_home("claude", Path::new("/Users/test")),
@@ -2124,44 +2034,6 @@ mod tests {
                 PathBuf::from("/Users/test/.claude/projects"),
                 PathBuf::from("/Users/test/.claude2/projects"),
             ]
-        );
-    }
-
-    #[test]
-    fn ignores_unrelated_processes() {
-        assert_eq!(
-            parse_process_line("789 /Applications/Code.app/Contents/MacOS/Electron"),
-            None
-        );
-    }
-
-    #[test]
-    fn ignores_agent_background_workers() {
-        assert_eq!(
-            parse_process_line(
-                "790 /Applications/ChatGPT.app/Contents/Resources/codex sandbox -- command"
-            ),
-            None
-        );
-        assert_eq!(
-            parse_process_line("791 /Users/test/.local/bin/claude daemon run"),
-            None
-        );
-        assert_eq!(
-            parse_process_line("792 claude bg-pty-host --bg-pty-host /tmp/session.sock"),
-            None
-        );
-        assert_eq!(
-            parse_process_line(
-                "793 /Applications/ChatGPT.app/Contents/Frameworks/Codex Framework.framework/Helpers/Codex (Renderer)"
-            ),
-            None
-        );
-        assert_eq!(
-            parse_process_line(
-                "794 /Users/test/.codex/computer-use/Codex Computer Use.app/Contents/MacOS/SkyComputerUseService"
-            ),
-            None
         );
     }
 
