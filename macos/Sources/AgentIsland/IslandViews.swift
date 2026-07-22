@@ -623,6 +623,27 @@ private struct HoverSettingsPanel: View {
     @ObservedObject var model: IslandModel
 
     var body: some View {
+        // Scrolls because the panel's height is fixed: without this, adding a
+        // setting silently clips the one below it off the bottom, and a control
+        // nobody can reach is indistinguishable from a broken one.
+        ScrollView(.vertical) {
+            settingsContent
+        }
+        .scrollIndicators(.visible)
+        .frame(
+            maxWidth: .infinity,
+            minHeight: IslandModel.settingsTabContentHeight,
+            maxHeight: IslandModel.settingsTabContentHeight,
+            alignment: .top
+        )
+        .background(IslandPalette.raised)
+        .overlay {
+            RoundedRectangle(cornerRadius: 10, style: .continuous).stroke(IslandPalette.line)
+        }
+        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+    }
+
+    private var settingsContent: some View {
         VStack(alignment: .leading, spacing: 6) {
             Text("HOVER TIMING")
                 .font(.system(size: 8, weight: .bold, design: .monospaced))
@@ -676,20 +697,56 @@ private struct HoverSettingsPanel: View {
             .toggleStyle(.switch)
             .tint(Color(hex: model.accentHex))
             .controlSize(.mini)
+
+            Toggle(isOn: Binding(
+                get: { model.answerHookEnabled },
+                set: { model.setAnswerHookEnabled($0) }
+            )) {
+                VStack(alignment: .leading, spacing: 1) {
+                    Text("ANSWER FROM ISLAND")
+                        .font(.system(size: 9, weight: .semibold, design: .monospaced))
+                        .foregroundStyle(IslandPalette.text.opacity(0.82))
+                    Text(model.answerHookError ?? "adds a hook to Claude & Codex")
+                        .font(.system(size: 7.5, weight: .medium, design: .monospaced))
+                        .foregroundStyle(
+                            model.answerHookError == nil
+                                ? IslandPalette.secondary
+                                : Color(hex: 0xE2A44F))
+                        .lineLimit(2)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            .toggleStyle(.switch)
+            .tint(Color(hex: model.accentHex))
+            .controlSize(.mini)
+            .help("Lets you answer an agent's question by clicking it here instead of switching to the terminal")
+
+            Toggle(isOn: Binding(
+                get: { model.suppressSystemVolumeHUD },
+                set: { model.setSuppressSystemVolumeHUD($0) }
+            )) {
+                VStack(alignment: .leading, spacing: 1) {
+                    Text("HIDE SYSTEM VOLUME HUD")
+                        .font(.system(size: 9, weight: .semibold, design: .monospaced))
+                        .foregroundStyle(IslandPalette.text.opacity(0.82))
+                    Text(model.volumeHUDError ?? "needs accessibility")
+                        .font(.system(size: 7.5, weight: .medium, design: .monospaced))
+                        .foregroundStyle(
+                            model.volumeHUDError == nil
+                                ? IslandPalette.secondary
+                                : Color(hex: 0xE2A44F))
+                        .lineLimit(2)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            .toggleStyle(.switch)
+            .tint(Color(hex: model.accentHex))
+            .controlSize(.mini)
+            .help("Stops macOS drawing its own volume overlay on top of the island's")
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 8)
-        .frame(
-            maxWidth: .infinity,
-            minHeight: IslandModel.settingsTabContentHeight,
-            maxHeight: IslandModel.settingsTabContentHeight,
-            alignment: .top
-        )
-        .background(IslandPalette.raised)
-        .overlay {
-            RoundedRectangle(cornerRadius: 10, style: .continuous).stroke(IslandPalette.line)
-        }
-        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     private func delayRow(
@@ -1233,7 +1290,12 @@ private struct SessionInlineInspector: View {
             }
             .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
 
-            if let question = session.pendingQuestion {
+            // A live ask wins over the transcript-scraped echo of the same
+            // question: only one of them can actually be answered.
+            if let ask = model.pendingAsk, ask.matches(session) {
+                AnswerableQuestionCard(model: model, ask: ask, accent: accent)
+            } else if let question = session.pendingQuestion,
+                      !model.isAlreadyAnswered(question) {
                 PendingQuestionCard(question: question, accent: accent)
             }
 
@@ -1853,7 +1915,7 @@ private enum MascotImageStore {
     static let cache = NSCache<NSString, NSImage>()
 
     static func image(provider: AgentProvider, fallbackSize: CGFloat) -> NSImage {
-        let key = provider.assetName as NSString
+        let key = "\(provider.assetName)@\(provider.pixelCells)" as NSString
         if let cached = cache.object(forKey: key) {
             return cached
         }
@@ -1863,8 +1925,44 @@ private enum MascotImageStore {
             return NSImage(size: NSSize(width: fallbackSize, height: fallbackSize))
         }
 
-        cache.setObject(image, forKey: key)
-        return image
+        let sprite = pixelated(image, cells: provider.pixelCells) ?? image
+        cache.setObject(sprite, forKey: key)
+        return sprite
+    }
+
+    /// Reduce artwork to a small grid so it can be blown back up as hard squares.
+    ///
+    /// Averaging down and then drawing back up with interpolation disabled is
+    /// what produces real pixel art. Nearest-neighbour in *both* directions just
+    /// drops detail and leaves ragged edges instead of clean cells.
+    private static func pixelated(_ image: NSImage, cells: Int) -> NSImage? {
+        let source = image.size
+        guard source.width > 0, source.height > 0, cells > 0 else { return nil }
+
+        // Fit inside the grid rather than filling it, so a tall sprite is not
+        // squashed into a square.
+        let scale = min(CGFloat(cells) / source.width, CGFloat(cells) / source.height)
+        let fitted = NSSize(
+            width: max(1, (source.width * scale).rounded()),
+            height: max(1, (source.height * scale).rounded()))
+
+        guard let rep = NSBitmapImageRep(
+            bitmapDataPlanes: nil,
+            pixelsWide: Int(fitted.width), pixelsHigh: Int(fitted.height),
+            bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
+            colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0
+        ) else { return nil }
+
+        NSGraphicsContext.saveGraphicsState()
+        defer { NSGraphicsContext.restoreGraphicsState() }
+        guard let context = NSGraphicsContext(bitmapImageRep: rep) else { return nil }
+        NSGraphicsContext.current = context
+        context.imageInterpolation = .high
+        image.draw(in: NSRect(origin: .zero, size: fitted))
+
+        let reduced = NSImage(size: fitted)
+        reduced.addRepresentation(rep)
+        return reduced
     }
 }
 
@@ -1919,6 +2017,9 @@ struct MascotView: View {
     var body: some View {
         ZStack {
             Image(nsImage: image)
+                // Nearest-neighbour, or the sprite's cells smear into each other
+                // at the sizes the island actually draws them.
+                .interpolation(.none)
                 .resizable()
                 .scaledToFit()
                 .frame(width: size, height: size)
@@ -1937,57 +2038,38 @@ struct MascotView: View {
         }
     }
 
+    /// Badges are sprites too, not font glyphs in capsules: a smooth rounded
+    /// bubble beside a pixel mascot reads as two art styles pasted together.
     @ViewBuilder
     private var expressionOverlay: some View {
         switch phase {
         case .idle:
-            Text("z")
-                .font(.system(size: max(7, size * 0.18), weight: .bold, design: .monospaced))
-                .foregroundStyle(Color(hex: 0x31362E))
-                .padding(4)
-                .background(Color(hex: 0xD5D8D0))
-                .clipShape(Circle())
-                .offset(x: size * 0.42, y: -size * 0.42)
+            badge(PixelGlyphs.sleep, color: Color(hex: 0xD5D8D0), fraction: 0.34)
         case .thinking:
             if pose == 1 || pose == 2 {
-                HStack(spacing: 2) {
-                    Circle().frame(width: 3, height: 3)
-                    Circle().frame(width: 4, height: 4)
-                    Circle().frame(width: 6, height: 6)
-                }
-                .foregroundStyle(accent)
-                .padding(4)
-                .background(IslandPalette.surface)
-                .clipShape(Capsule())
-                .offset(x: size * 0.45, y: -size * 0.44)
-                .transition(.scale.combined(with: .opacity))
+                badge(PixelGlyphs.ellipsis, color: accent, fraction: 0.12)
+                    .transition(.opacity)
             } else if pose == 3 {
-                Text("✦")
-                    .font(.system(size: max(8, size * 0.2), weight: .bold))
-                    .foregroundStyle(IslandPalette.surface)
-                    .padding(4)
-                    .background(accent)
-                    .clipShape(Circle())
-                    .offset(x: size * 0.44, y: -size * 0.44)
-                    .transition(.scale.combined(with: .opacity))
+                badge(PixelGlyphs.question, color: accent, fraction: 0.34)
+                    .transition(.opacity)
             }
         case .question:
-            Text("?")
-                .font(.system(size: max(8, size * 0.2), weight: .bold, design: .monospaced))
-                .foregroundStyle(Color(hex: 0x25160A))
-                .padding(5)
-                .background(accent)
-                .clipShape(Circle())
-                .offset(x: size * 0.43, y: -size * 0.43)
+            // The one that matters: the mascot is waiting on the user, so this
+            // bobs rather than sitting still.
+            badge(PixelGlyphs.question, color: Color(hex: 0xF3E4D2), fraction: 0.46)
+                .offset(y: pose == 1 ? -1 : 0)
         case .complete:
-            Text("✓")
-                .font(.system(size: max(7, size * 0.18), weight: .black))
-                .foregroundStyle(IslandPalette.surface)
-                .padding(4)
-                .background(accent)
-                .clipShape(Circle())
-                .offset(x: size * 0.43, y: -size * 0.43)
+            badge(PixelGlyphs.check, color: accent, fraction: 0.3)
         }
+    }
+
+    private func badge(_ rows: [String], color: Color, fraction: CGFloat) -> some View {
+        PixelGlyph(
+            rows: rows,
+            color: color,
+            cell: pixelCellSize(mascotSize: size, rowCount: rows.count, fraction: fraction)
+        )
+        .offset(x: size * 0.44, y: -size * 0.40)
     }
 
     @MainActor

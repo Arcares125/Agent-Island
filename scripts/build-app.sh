@@ -61,7 +61,26 @@ cp "$ICON_FILE" "$RESOURCES_DIR/AgentIsland.icns"
 
 chmod +x "$MACOS_DIR/AgentIsland" "$HELPERS_DIR/agent-core"
 xattr -cr "$APP_DIR"
-codesign --force --sign - --options runtime --timestamp=none "$HELPERS_DIR/agent-core"
-codesign --force --sign - --options runtime --timestamp=none "$APP_DIR"
+# Sign with a local identity when one exists, otherwise ad-hoc.
+#
+# This matters for permissions, not for distribution. macOS pins Accessibility
+# and audio-capture grants to the signature's designated requirement; an ad-hoc
+# signature changes on every build, so every rebuild revokes them. A stable
+# self-signed identity keeps the requirement constant, so a grant survives.
+#
+# Contributors without the certificate still get a working ad-hoc build; they
+# just re-approve permissions after each rebuild. Create one with:
+#   scripts/make-signing-cert.sh
+SIGNING_IDENTITY="Agent Island Local"
+if security find-certificate -c "$SIGNING_IDENTITY" >/dev/null 2>&1; then
+    SIGN_AS="$SIGNING_IDENTITY"
+    echo "signing as: $SIGNING_IDENTITY (stable identity, permissions persist)"
+else
+    SIGN_AS="-"
+    echo "signing ad-hoc (no local identity; permissions reset each build)"
+fi
+
+codesign --force --sign "$SIGN_AS" --options runtime --timestamp=none "$HELPERS_DIR/agent-core"
+codesign --force --sign "$SIGN_AS" --options runtime --timestamp=none "$APP_DIR"
 
 echo "$APP_DIR"

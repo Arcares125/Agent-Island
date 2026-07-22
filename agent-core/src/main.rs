@@ -1,8 +1,11 @@
+mod ask;
+mod platform;
+
+use platform::scan_processes;
 use std::collections::HashMap;
 use std::fs::{self, File};
-use std::io::{Read, Seek, SeekFrom};
+use std::io::{BufRead, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::thread;
 use std::time::{Duration, Instant, SystemTime};
 
@@ -38,6 +41,9 @@ struct TelemetryReader {
     reasoning_effort: Option<String>,
     latest_prompt: Option<String>,
     pending_question: Option<PendingQuestion>,
+    /// Whether any process of this provider is still running. A transcript
+    /// outlives its writer, so this is the only signal that a session is gone.
+    provider_alive: bool,
     revision: u64,
 }
 
@@ -71,6 +77,7 @@ impl TelemetryReader {
             reasoning_effort: None,
             latest_prompt: None,
             pending_question: None,
+            provider_alive: true,
             revision: 0,
         }
     }
@@ -113,6 +120,7 @@ impl TelemetryReader {
         state_for_activity(
             self.activity_log.last().map(String::as_str),
             self.activity_age(),
+            self.provider_alive,
         )
     }
 
@@ -315,6 +323,11 @@ impl SessionTracker {
             let Some(provider) = reader.provider else {
                 continue;
             };
+            // A transcript outlives the process that wrote it, so liveness has to
+            // come from the process list rather than the file.
+            reader.provider_alive = detected_agents
+                .iter()
+                .any(|agent| agent.provider == provider);
             reader.read_updates(provider);
         }
 
@@ -510,7 +523,23 @@ fn main() {
             }
             return;
         }
+        // Invoked by the agent as a PreToolUse hook, not by the island.
+        Some("--ask-hook") => {
+            std::process::exit(ask::run_hook_helper());
+        }
         _ => {}
+    }
+
+    // Answering is optional: if the socket cannot be bound the island still
+    // reports telemetry, it just cannot deliver a pick.
+    if let Some(registry) = ask::serve() {
+        thread::spawn(move || {
+            for line in std::io::stdin().lock().lines().map_while(Result::ok) {
+                if let Some((request_id, index)) = ask::parse_answer_command(&line) {
+                    registry.resolve(&request_id, index);
+                }
+            }
+        });
     }
 
     let mut active_session_id: Option<String> = None;
@@ -609,69 +638,6 @@ fn main() {
     }
 }
 
-fn scan_processes() -> Vec<DetectedAgent> {
-    let Ok(output) = Command::new("/bin/ps")
-        .args(["-axo", "pid=,command="])
-        .output()
-    else {
-        return Vec::new();
-    };
-
-    let process_list = String::from_utf8_lossy(&output.stdout);
-    let mut agents = process_list
-        .lines()
-        .filter_map(parse_process_line)
-        .collect::<Vec<_>>();
-    agents.sort_by_key(|agent| agent.pid);
-    agents
-}
-
-fn parse_process_line(line: &str) -> Option<DetectedAgent> {
-    let trimmed = line.trim();
-    let split_at = trimmed.find(char::is_whitespace)?;
-    let pid = trimmed[..split_at].parse::<u32>().ok()?;
-    if pid == std::process::id() {
-        return None;
-    }
-
-    let command = trimmed[split_at..].trim();
-    // `ps` does not quote executable paths containing spaces. Without this
-    // guard, paths such as ".../Frameworks/Codex Framework.framework/..."
-    // look like an executable named Codex after whitespace splitting.
-    if command.contains("/Contents/Frameworks/") || command.contains(".app/Contents/MacOS/") {
-        return None;
-    }
-    let mut command_parts = command.split_whitespace();
-    let executable = command_parts.next()?;
-    let executable_name = executable.rsplit('/').next()?.to_ascii_lowercase();
-    let first_argument = command_parts.next();
-
-    let provider = match executable_name.as_str() {
-        "codex" => {
-            // A Codex session may own sandbox workers. They are implementation
-            // details of one session and must never inflate the session count.
-            if first_argument == Some("sandbox") {
-                return None;
-            }
-            "codex"
-        }
-        "claude" => {
-            // Claude keeps daemons and spare PTY hosts around. Count interactive
-            // processes, not those background helpers.
-            if matches!(first_argument, Some("daemon" | "bg-pty-host" | "bg-spare"))
-                || command.contains(" --bg-pty-host ")
-                || command.contains(" --bg-spare ")
-            {
-                return None;
-            }
-            "claude"
-        }
-        _ => return None,
-    };
-
-    Some(DetectedAgent { provider, pid })
-}
-
 fn emit_snapshot(
     agent: Option<&DetectedAgent>,
     elapsed_seconds: u64,
@@ -698,7 +664,11 @@ fn emit_snapshot(
             let activity_age = reader
                 .and_then(|reader| reader.last_modified)
                 .and_then(|modified| SystemTime::now().duration_since(modified).ok());
-            let state = state_for_activity(current_activity.as_deref(), activity_age);
+            let state = state_for_activity(
+                current_activity.as_deref(),
+                activity_age,
+                reader.is_none_or(|reader| reader.provider_alive),
+            );
             let workspace = reader
                 .and_then(|reader| reader.workspace_path.as_deref())
                 .map(display_file_name);
@@ -831,11 +801,25 @@ fn session_activity_fields_json(reader: &TelemetryReader) -> String {
     )
 }
 
-fn state_for_activity(activity: Option<&str>, age: Option<Duration>) -> &'static str {
+fn state_for_activity(
+    activity: Option<&str>,
+    age: Option<Duration>,
+    provider_alive: bool,
+) -> &'static str {
     const COMPLETE_GRACE: Duration = Duration::from_secs(12);
     const STALE_ACTIVITY: Duration = Duration::from_secs(60);
+    /// A pending question is the one state that legitimately sits still for a
+    /// long time — the transcript stops changing while the user thinks, so the
+    /// 60s staleness bound would cut real questions off. But it cannot be
+    /// unbounded either: when a session is closed without answering, nothing is
+    /// ever appended, and the island would keep demanding input for a terminal
+    /// that no longer exists.
+    const ABANDONED_QUESTION: Duration = Duration::from_secs(5 * 60);
 
     match (activity, age) {
+        // No agent of this provider is running, so nobody is waiting on anything.
+        (Some("Waiting for your answer"), _) if !provider_alive => "idle",
+        (Some("Waiting for your answer"), Some(age)) if age > ABANDONED_QUESTION => "idle",
         (Some("Waiting for your answer"), _) => "question",
         (Some("Completed task"), Some(age)) if age <= COMPLETE_GRACE => "complete",
         (Some("Completed task"), _) => "idle",
@@ -1000,13 +984,7 @@ fn ingest_claude_status() {
 }
 
 fn claude_cache_path() -> Option<PathBuf> {
-    let home = std::env::var_os("HOME").map(PathBuf::from)?;
-    Some(
-        home.join("Library")
-            .join("Caches")
-            .join("com.agentisland.AgentIsland")
-            .join("claude-usage.json"),
-    )
+    Some(platform::cache_dir()?.join("claude-usage.json"))
 }
 
 fn write_claude_cache(usage: &UsageTelemetry) -> std::io::Result<()> {
@@ -1069,7 +1047,7 @@ fn telemetry_roots_for_home(provider: &str, home: &Path) -> Vec<PathBuf> {
 }
 
 fn collect_provider_candidates(provider: &'static str, candidates: &mut Vec<SessionCandidate>) {
-    let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
+    let Some(home) = platform::home_dir() else {
         return;
     };
     let max_depth = if provider == "codex" { 5 } else { 4 };
@@ -1390,6 +1368,22 @@ fn parse_pending_question(provider: &str, line: &str) -> Option<PendingQuestion>
     // same line cannot be mistaken for the question payload.
     let name_index = line.find("\"name\":\"AskUserQuestion\"")?;
     let input = object_for_key(&line[name_index..], "input")?;
+    question_from_input_object(input)
+}
+
+/// The question as it arrives on a hook's stdin, where the agent supplies
+/// `tool_input` rather than the transcript's `input`. Codex spells the same
+/// fields in snake_case, so both are accepted.
+fn parse_hook_question(payload: &str) -> Option<PendingQuestion> {
+    let input = object_for_key(payload, "tool_input")
+        .or_else(|| object_for_key(payload, "toolInput"))
+        .or_else(|| object_for_key(payload, "input"))?;
+    question_from_input_object(input)
+}
+
+/// Shared core: pull the first question and its options out of an
+/// `AskUserQuestion`-shaped input object, bounding every field.
+fn question_from_input_object(input: &str) -> Option<PendingQuestion> {
     let questions = array_for_key(input, "questions")?;
     let first = object_values(questions).into_iter().next()?;
 
@@ -1434,6 +1428,12 @@ fn pending_question_json(reader: &TelemetryReader) -> String {
     let Some(question) = reader.pending_question.as_ref() else {
         return String::from("null");
     };
+    question_json(question)
+}
+
+/// JSON for a single question. Shared by the snapshot field and the answer
+/// transport so the island decodes one shape either way.
+fn question_json(question: &PendingQuestion) -> String {
     let options = question
         .options
         .iter()
@@ -2027,28 +2027,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn detects_codex_cli() {
-        assert_eq!(
-            parse_process_line("  123 /opt/homebrew/bin/codex --profile work"),
-            Some(DetectedAgent {
-                provider: "codex",
-                pid: 123
-            })
-        );
-    }
-
-    #[test]
-    fn detects_claude_cli() {
-        assert_eq!(
-            parse_process_line("456 /Users/test/.local/bin/claude"),
-            Some(DetectedAgent {
-                provider: "claude",
-                pid: 456
-            })
-        );
-    }
-
-    #[test]
     fn discovers_primary_and_secondary_claude_profile_roots() {
         assert_eq!(
             telemetry_roots_for_home("claude", Path::new("/Users/test")),
@@ -2056,44 +2034,6 @@ mod tests {
                 PathBuf::from("/Users/test/.claude/projects"),
                 PathBuf::from("/Users/test/.claude2/projects"),
             ]
-        );
-    }
-
-    #[test]
-    fn ignores_unrelated_processes() {
-        assert_eq!(
-            parse_process_line("789 /Applications/Code.app/Contents/MacOS/Electron"),
-            None
-        );
-    }
-
-    #[test]
-    fn ignores_agent_background_workers() {
-        assert_eq!(
-            parse_process_line(
-                "790 /Applications/ChatGPT.app/Contents/Resources/codex sandbox -- command"
-            ),
-            None
-        );
-        assert_eq!(
-            parse_process_line("791 /Users/test/.local/bin/claude daemon run"),
-            None
-        );
-        assert_eq!(
-            parse_process_line("792 claude bg-pty-host --bg-pty-host /tmp/session.sock"),
-            None
-        );
-        assert_eq!(
-            parse_process_line(
-                "793 /Applications/ChatGPT.app/Contents/Frameworks/Codex Framework.framework/Helpers/Codex (Renderer)"
-            ),
-            None
-        );
-        assert_eq!(
-            parse_process_line(
-                "794 /Users/test/.codex/computer-use/Codex Computer Use.app/Contents/MacOS/SkyComputerUseService"
-            ),
-            None
         );
     }
 
@@ -2136,32 +2076,65 @@ mod tests {
         }
     }
 
+    /// A question outlasts the 60s staleness bound that every other state obeys,
+    /// because the transcript stops changing while the user thinks.
     #[test]
-    fn derives_status_from_activity_instead_of_process_presence() {
-        assert_eq!(
-            state_for_activity(Some("Running a command"), Some(Duration::from_secs(3))),
-            "thinking"
-        );
-        assert_eq!(
-            state_for_activity(Some("Completed task"), Some(Duration::from_secs(3))),
-            "complete"
-        );
-        assert_eq!(
-            state_for_activity(Some("Completed task"), Some(Duration::from_secs(15))),
-            "idle"
-        );
-        assert_eq!(
-            state_for_activity(Some("Running a command"), Some(Duration::from_secs(61))),
-            "idle"
-        );
+    fn keeps_a_question_pending_while_the_user_deliberates() {
         assert_eq!(
             state_for_activity(
                 Some("Waiting for your answer"),
-                Some(Duration::from_secs(3_600))
+                Some(Duration::from_secs(90)),
+                true
             ),
-            "question"
+            "question",
+            "a minute of silence is someone reading the options, not an abandoned session"
         );
-        assert_eq!(state_for_activity(None, None), "idle");
+    }
+
+    /// Regression: a question with no staleness bound kept the island demanding
+    /// input for a terminal the user had already closed.
+    #[test]
+    fn retires_a_question_nobody_is_left_to_answer() {
+        assert_eq!(
+            state_for_activity(
+                Some("Waiting for your answer"),
+                Some(Duration::from_secs(30)),
+                false
+            ),
+            "idle",
+            "no agent process is running, so nothing can be waiting on an answer"
+        );
+
+        assert_eq!(
+            state_for_activity(
+                Some("Waiting for your answer"),
+                Some(Duration::from_secs(3_600)),
+                true
+            ),
+            "idle",
+            "an hour with no transcript activity is abandoned, even with an agent still running"
+        );
+    }
+
+    #[test]
+    fn derives_status_from_activity_instead_of_process_presence() {
+        assert_eq!(
+            state_for_activity(Some("Running a command"), Some(Duration::from_secs(3)), true),
+            "thinking"
+        );
+        assert_eq!(
+            state_for_activity(Some("Completed task"), Some(Duration::from_secs(3)), true),
+            "complete"
+        );
+        assert_eq!(
+            state_for_activity(Some("Completed task"), Some(Duration::from_secs(15)), true),
+            "idle"
+        );
+        assert_eq!(
+            state_for_activity(Some("Running a command"), Some(Duration::from_secs(61)), true),
+            "idle"
+        );
+        assert_eq!(state_for_activity(None, None, true), "idle");
 
         assert_eq!(
             task_for_snapshot(

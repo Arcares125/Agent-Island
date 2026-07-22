@@ -127,6 +127,7 @@ private struct PanelFrameAnimation {
 final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private let model = IslandModel()
     private let coreClient = AgentCoreClient()
+    private let volumeKeyTap = VolumeKeyTap()
     private let audioMonitor: AudioMonitoring = AudioMonitor()
     private let notificationCenter = UNUserNotificationCenter.current()
     private var panel: IslandPanel?
@@ -185,6 +186,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         model.visualizerEnabledDidChange = { [weak self] enabled in
             self?.audioMonitor.setVisualizerEnabled(enabled)
         }
+        // Returns whether the tap is actually running, so the toggle can never
+        // sit "on" while macOS is still drawing its own overlay.
+        model.volumeHUDSuppressionDidChange = { [weak self] enabled in
+            guard let self else { return false }
+            guard enabled else {
+                self.volumeKeyTap.stop()
+                return false
+            }
+            if !VolumeKeyTap.hasAccessibilityPermission() {
+                VolumeKeyTap.requestAccessibilityPermission()
+            }
+            return self.volumeKeyTap.start()
+        }
+        if model.suppressSystemVolumeHUD {
+            _ = volumeKeyTap.start()
+        }
         if model.musicVisualizerEnabled {
             audioMonitor.setVisualizerEnabled(true)
         }
@@ -196,6 +213,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         NotificationCenter.default.removeObserver(self)
         NSWorkspace.shared.notificationCenter.removeObserver(self)
         coreClient.stop()
+        volumeKeyTap.stop()
         audioMonitor.stop()
         model.temporaryFileShelf.shutdown()
     }
