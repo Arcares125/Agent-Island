@@ -14,13 +14,19 @@
   macOS 14+ · Native SwiftUI/AppKit · Dependency-free Rust helper · Local-first · Version 2.5.1 (build 59)
 </p>
 
+<p align="center">
+  <a href="https://github.com/Arcares125/Agent-Island/releases/latest">
+    <img src="assets/download-macos.svg" alt="Download Agent Island for macOS — Apple Silicon, macOS 14+" width="390" />
+  </a>
+</p>
+
 ---
 
 ## Install (no coding required)
 
 You don't need to build anything or touch a terminal.
 
-1. Open the **[Releases page](../../releases/latest)** and download **`Agent-Island-<version>-arm64.dmg`** (Apple Silicon — M1/M2/M3/M4/M5).
+1. Click **Download for macOS** above, then download **`Agent-Island-<version>-arm64.dmg`** from the latest release (Apple Silicon — M1/M2/M3/M4/M5).
 2. Double-click the downloaded `.dmg`, then drag **Agent Island** onto the **Applications** folder.
 3. Open **Agent Island** from your Applications folder.
 
