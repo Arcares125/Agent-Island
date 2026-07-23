@@ -15,7 +15,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/Arcares125/Agent-Island/releases/latest">
+  <a href="https://github.com/Arcares125/Agent-Island/releases/latest/download/Agent-Island-latest-arm64.dmg">
     <img src="assets/download-macos.svg" alt="Download Agent Island for macOS — Apple Silicon, macOS 14+" width="390" />
   </a>
 </p>
@@ -26,7 +26,7 @@
 
 You don't need to build anything or touch a terminal.
 
-1. Click **Download for macOS** above, then download **`Agent-Island-<version>-arm64.dmg`** from the latest release (Apple Silicon — M1/M2/M3/M4/M5).
+1. Click **Download for macOS** above. The latest Apple Silicon DMG starts downloading immediately (M1/M2/M3/M4/M5).
 2. Double-click the downloaded `.dmg`, then drag **Agent Island** onto the **Applications** folder.
 3. Open **Agent Island** from your Applications folder.
 

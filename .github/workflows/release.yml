@@ -53,12 +53,15 @@ jobs:
         run: |
           set -euo pipefail
           DMG="Agent-Island-${{ steps.meta.outputs.version }}-arm64.dmg"
+          LATEST_DMG="Agent-Island-latest-arm64.dmg"
           STAGE="$(mktemp -d)"
           cp -R "dist/Agent Island.app" "$STAGE/"
           ln -s /Applications "$STAGE/Applications"
           hdiutil create -volname "Agent Island" \
             -srcfolder "$STAGE" -ov -format UDZO "$DMG"
+          cp "$DMG" "$LATEST_DMG"
           echo "path=$DMG" >> "$GITHUB_OUTPUT"
+          echo "latest_path=$LATEST_DMG" >> "$GITHUB_OUTPUT"
 
       - name: Publish Release
         env:
@@ -68,9 +71,14 @@ jobs:
           TAG="${{ steps.meta.outputs.tag }}"
           NOTES="macOS (Apple Silicon, macOS 14+) build. This is a free, independent build, so the first launch needs a one-time approval — see **Install (no coding required)** in the README."
           if gh release view "$TAG" >/dev/null 2>&1; then
-            gh release upload "$TAG" "${{ steps.dmg.outputs.path }}" --clobber
+            gh release upload "$TAG" \
+              "${{ steps.dmg.outputs.path }}" \
+              "${{ steps.dmg.outputs.latest_path }}" \
+              --clobber
           else
-            gh release create "$TAG" "${{ steps.dmg.outputs.path }}" \
+            gh release create "$TAG" \
+              "${{ steps.dmg.outputs.path }}" \
+              "${{ steps.dmg.outputs.latest_path }}" \
               --title "Agent Island $TAG" \
               --notes "$NOTES"
           fi
