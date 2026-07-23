@@ -256,29 +256,13 @@ private struct NotchCompactIslandView: View {
                 Color.clear
                     .frame(width: presentation.cameraWidth)
 
-                HStack(spacing: 4) {
-                    if model.isShowingSoundwave {
-                        Image(systemName: "music.note")
-                            .font(.system(size: 9, weight: .bold))
-                            .foregroundStyle(Color(hex: 0xB8A6F2))
-                        SoundwaveView(
-                            store: model.spectrumStore,
-                            isActive: model.animationsEnabled,
-                            barWidth: 3.5,
-                            spacing: 3,
-                            maxBarHeight: 13
-                        )
-                    } else {
-                        Circle()
-                            .fill(Color(hex: displayedPhase.statusAccentHex))
-                            .frame(width: 4, height: 4)
-                        Text(sessionCountText)
-                            .font(.system(size: 9.5, weight: .semibold, design: .monospaced))
-                            .foregroundStyle(IslandPalette.text.opacity(0.82))
-                            .lineLimit(1)
-                            .minimumScaleFactor(0.85)
-                    }
-                }
+                CompactCalendarControl(
+                    model: model,
+                    sessionCount: model.sessions.isEmpty
+                        ? model.activeSessionCount
+                        : model.sessions.count,
+                    phase: displayedPhase
+                )
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
             }
             .padding(.horizontal, 7)
@@ -286,10 +270,117 @@ private struct NotchCompactIslandView: View {
         }
     }
 
-    private var sessionCountText: String {
-        let count = model.sessions.isEmpty ? model.activeSessionCount : model.sessions.count
-        guard count > 0 else { return "No sessions" }
-        return "\(count) \(count == 1 ? "session" : "sessions")"
+}
+
+private struct CompactCalendarControl: View {
+    @ObservedObject var model: IslandModel
+    let sessionCount: Int
+    let phase: AgentPhase
+
+    var body: some View {
+        Group {
+            if sessionCount > 0 {
+                // Five seconds is long enough to read either face and wakes the
+                // tiny wing only twelve times per minute—not once per second.
+                TimelineView(.periodic(from: .now, by: IslandCalendar.compactFaceDuration)) { timeline in
+                    calendarButton(
+                        date: timeline.date,
+                        showsSession: IslandCalendar.compactWingShowsSession(
+                            at: timeline.date,
+                            sessionCount: sessionCount,
+                            calendarPresented: model.isCalendarPresented
+                        ),
+                        showsSoundwave: false
+                    )
+                }
+            } else {
+                TimelineView(.periodic(from: .now, by: 60)) { timeline in
+                    calendarButton(
+                        date: timeline.date,
+                        showsSession: false,
+                        showsSoundwave: model.isShowingSoundwave
+                    )
+                }
+            }
+        }
+    }
+
+    private func calendarButton(
+        date: Date,
+        showsSession: Bool,
+        showsSoundwave: Bool
+    ) -> some View {
+        Button {
+            model.toggleCalendar()
+        } label: {
+            HStack(spacing: 4) {
+                if showsSoundwave {
+                    SoundwaveView(
+                        store: model.spectrumStore,
+                        isActive: model.animationsEnabled && model.isShowingSoundwave,
+                        barWidth: 1.4,
+                        spacing: 1.1,
+                        maxBarHeight: 10
+                    )
+                    .transition(.opacity.combined(with: .scale(scale: 0.9)))
+                }
+
+                if showsSession {
+                    HStack(spacing: 4) {
+                        Circle()
+                            .fill(Color(hex: phase.statusAccentHex))
+                            .frame(width: 4, height: 4)
+                        Text("\(sessionCount) \(sessionCount == 1 ? "SESSION" : "SESSIONS")")
+                            .font(.system(size: 8, weight: .bold, design: .monospaced))
+                            .foregroundStyle(IslandPalette.text.opacity(0.86))
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.72)
+                    }
+                    .transition(.opacity.combined(with: .move(edge: .bottom)))
+                } else {
+                    HStack(spacing: 4) {
+                        Image(systemName: "calendar")
+                            .font(.system(size: 10, weight: .semibold))
+                            .foregroundStyle(
+                                model.isCalendarPresented
+                                    ? Color(hex: 0xB7A7EE)
+                                    : IslandPalette.text.opacity(0.88)
+                            )
+                            .frame(width: 13, height: 17)
+
+                        VStack(alignment: .leading, spacing: -1) {
+                            Text(IslandCalendar.compactDate(date))
+                                .font(.system(size: 7.5, weight: .semibold, design: .rounded))
+                                .foregroundStyle(IslandPalette.secondary)
+                            Text(IslandCalendar.compactTime(date))
+                                .font(.system(size: 9, weight: .semibold, design: .monospaced))
+                                .foregroundStyle(IslandPalette.text.opacity(0.9))
+                                .monospacedDigit()
+                        }
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.8)
+                    }
+                    .transition(.opacity.combined(with: .move(edge: .top)))
+                }
+            }
+            .padding(.horizontal, 4)
+            .padding(.vertical, 2)
+            .background(
+                model.isCalendarPresented
+                    ? Color(hex: 0x9480D8).opacity(0.15)
+                    : Color.clear
+            )
+            .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+            .contentShape(Rectangle())
+            .animation(.easeInOut(duration: 0.22), value: showsSession)
+        }
+        .buttonStyle(.plain)
+        .help(model.isCalendarPresented ? "Close calendar" : "Open calendar")
+        .accessibilityLabel(
+            "\(IslandCalendar.longDate(date)), "
+                + "\(IslandCalendar.compactTime(date)); "
+                + (model.isCalendarPresented ? "close calendar" : "open calendar")
+        )
     }
 }
 
@@ -475,7 +566,9 @@ struct ExpandedIslandView: View {
 
     var body: some View {
         Group {
-            if model.isShowingVolumeHUD {
+            if model.isShowingCalendar {
+                CalendarPanelView(model: model)
+            } else if model.isShowingVolumeHUD {
                 VolumeHUDView(
                     level: model.outputVolumeLevel,
                     direction: model.volumeTugDirection,
@@ -502,9 +595,9 @@ struct ExpandedIslandView: View {
                 }
             }
         }
-        .padding(.horizontal, model.isShowingVolumeHUD ? 18 : (model.monitoringEnabled && !model.sessions.isEmpty ? 12 : (model.phase == .question ? 16 : 18)))
-        .padding(.top, model.isShowingVolumeHUD ? 12 : (model.monitoringEnabled && !model.sessions.isEmpty ? 10 : (model.phase == .question || model.phase == .idle ? 14 : 0)))
-        .padding(.bottom, model.isShowingVolumeHUD ? 12 : (model.monitoringEnabled && !model.sessions.isEmpty ? 12 : (model.phase == .question ? 16 : 18)))
+        .padding(.horizontal, model.isShowingCalendar ? 16 : (model.isShowingVolumeHUD ? 18 : (model.monitoringEnabled && !model.sessions.isEmpty ? 12 : (model.phase == .question ? 16 : 18))))
+        .padding(.top, model.isShowingCalendar ? 10 : (model.isShowingVolumeHUD ? 12 : (model.monitoringEnabled && !model.sessions.isEmpty ? 10 : (model.phase == .question || model.phase == .idle ? 14 : 0))))
+        .padding(.bottom, model.isShowingCalendar ? 12 : (model.isShowingVolumeHUD ? 12 : (model.monitoringEnabled && !model.sessions.isEmpty ? 12 : (model.phase == .question ? 16 : 18))))
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
     }
 }
@@ -1696,24 +1789,191 @@ private struct IdleDetailView: View {
     @ObservedObject var model: IslandModel
 
     var body: some View {
-        VStack(spacing: 10) {
-            Text("\(model.provider.displayName) is resting")
-                .font(.system(size: 13, weight: .semibold))
-                .foregroundStyle(IslandPalette.text)
-            Text(
-                model.activeSessionCount > 0
-                    ? "\(model.activeSessionCount) sessions remain open. Waiting for new transcript activity."
-                    : "Start an agent session and it will appear here automatically."
-            )
-                .font(.system(size: 10))
-                .foregroundStyle(IslandPalette.secondary)
-            Text(model.activeSessionCount > 0 ? "LOCAL MONITORING  ·  WAITING" : "⌥  SPACE  ·  QUICK LAUNCH")
-                .font(.system(size: 8, weight: .medium, design: .monospaced))
-                .tracking(0.7)
-                .foregroundStyle(IslandPalette.secondary.opacity(0.72))
-                .padding(.top, 3)
+        ZStack(alignment: .topTrailing) {
+            if model.isShowingIdleSettings {
+                IdleSettingsView(model: model)
+            } else {
+                restingScene
+            }
+
+            // The gear stands in for the whole tab bar here: with nothing running
+            // there is no dashboard to tab through, only the scene and settings.
+            Button(action: model.toggleIdleSettings) {
+                Image(systemName: model.isShowingIdleSettings ? "xmark" : "gearshape.fill")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(IslandPalette.secondary)
+                    .frame(width: 24, height: 24)
+                    .background(IslandPalette.raised)
+                    .clipShape(Circle())
+                    .overlay { Circle().stroke(IslandPalette.line) }
+                    .contentShape(Circle())
+            }
+            .buttonStyle(.plain)
+            .help(model.isShowingIdleSettings ? "Close settings" : "Settings")
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    private var restingScene: some View {
+        VStack(spacing: 8) {
+            IdlePlaygroundView(isActive: model.animationsEnabled)
+
+            Text(model.activeSessionCount > 0 ? "Sessions resting" : "No agents running")
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(IslandPalette.text)
+
+            Text(
+                model.activeSessionCount > 0
+                    ? "\(model.activeSessionCount) open · waiting for new transcript activity."
+                    : "Start Codex or Claude and it appears here automatically."
+            )
+            .font(.system(size: 10))
+            .foregroundStyle(IslandPalette.secondary)
+            .multilineTextAlignment(.center)
+            .lineLimit(2)
+            .fixedSize(horizontal: false, vertical: true)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+}
+
+/// The two resting mascots acting out the idle loop — dozing, listening to music,
+/// then playing together — so a no-session island reads as alive.
+private struct IdlePlaygroundView: View {
+    let isActive: Bool
+
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    private var animates: Bool { isActive && !reduceMotion }
+
+    var body: some View {
+        Group {
+            if animates {
+                // Capped well below display refresh: the sprites move in slow,
+                // readable steps, not a per-frame smear, and pause when hidden.
+                TimelineView(.animation(minimumInterval: 1.0 / 24.0, paused: false)) { context in
+                    IdleSceneStage(
+                        scene: IdleChoreography.scene(
+                            at: context.date.timeIntervalSinceReferenceDate),
+                        animates: true
+                    )
+                }
+            } else {
+                // Reduce-motion or animations-off: a single still resting frame.
+                IdleSceneStage(scene: IdleScene(activity: .sleeping, progress: 0), animates: false)
+            }
+        }
+    }
+}
+
+/// One frame of the idle loop: both mascots posed for the current scene, with a
+/// small caption naming what they are up to.
+private struct IdleSceneStage: View {
+    let scene: IdleScene
+    let animates: Bool
+
+    private static let mascotSize: CGFloat = 52
+    private static let baseOffset: CGFloat = 30
+
+    var body: some View {
+        VStack(spacing: 6) {
+            ZStack {
+                mascot(.codex, side: -1).offset(x: -Self.baseOffset)
+                mascot(.claude, side: 1).offset(x: Self.baseOffset)
+            }
+            .frame(height: Self.mascotSize + 14, alignment: .bottom)
+
+            Text(scene.activity.caption.uppercased())
+                .font(.system(size: 8, weight: .bold, design: .monospaced))
+                .tracking(0.9)
+                .foregroundStyle(IslandPalette.secondary.opacity(0.82))
+                .animation(.easeInOut(duration: 0.45), value: scene.activity)
+        }
+    }
+
+    private func mascot(_ provider: AgentProvider, side: CGFloat) -> some View {
+        let motion = IdleChoreography.motion(for: scene, side: side)
+        // Claude's sprite reads larger than Codex's at the same box, matching the
+        // proportions the live views already use.
+        let providerScale: CGFloat = provider == .claude ? 0.82 : 1
+
+        return ZStack(alignment: .topTrailing) {
+            Image(nsImage: MascotImageStore.image(provider: provider, fallbackSize: Self.mascotSize))
+                .interpolation(.none)
+                .resizable()
+                .scaledToFit()
+                .frame(width: Self.mascotSize, height: Self.mascotSize)
+                .scaleEffect(x: providerScale, y: providerScale * motion.scaleY, anchor: .bottom)
+                .offset(x: motion.dx, y: motion.dy)
+                .rotationEffect(.degrees(motion.rotation), anchor: .bottom)
+
+            badge(side: side)
+        }
+        .frame(width: Self.mascotSize, height: Self.mascotSize, alignment: .bottom)
+    }
+
+    @ViewBuilder
+    private func badge(side: CGFloat) -> some View {
+        if let rows = badgeGlyph(side: side) {
+            PixelGlyph(
+                rows: rows,
+                color: badgeColor,
+                cell: pixelCellSize(mascotSize: Self.mascotSize, rowCount: rows.count, fraction: 0.34)
+            )
+            .offset(x: 5, y: -6 - badgeDrift)
+            .opacity(badgeOpacity)
+        }
+    }
+
+    /// Which mark floats over which mascot. Sleep and play mark a single mascot to
+    /// stay uncluttered; music marks both, since they are both listening.
+    private func badgeGlyph(side: CGFloat) -> [String]? {
+        switch scene.activity {
+        case .sleeping: return side < 0 ? PixelGlyphs.sleep : nil
+        case .music: return PixelGlyphs.note
+        case .playing: return side > 0 ? PixelGlyphs.spark : nil
+        }
+    }
+
+    private var badgeColor: Color {
+        switch scene.activity {
+        case .sleeping: return Color(hex: 0xB9C2CC)
+        case .music: return Color(hex: 0xB8A6F2)
+        case .playing: return Color(hex: 0xF2C879)
+        }
+    }
+
+    /// A Zzz that drifts upward as it fades sells sleep; the others sit still.
+    private var badgeDrift: CGFloat {
+        guard animates, scene.activity == .sleeping else { return 0 }
+        return CGFloat(scene.progress) * 5
+    }
+
+    /// Fade each mark in and out at the edges of its scene so nothing pops.
+    private var badgeOpacity: Double {
+        guard animates else { return 1 }
+        let progress = scene.progress
+        let fadeIn = min(progress / 0.15, 1)
+        let fadeOut = min((1 - progress) / 0.15, 1)
+        return max(0, min(fadeIn, fadeOut))
+    }
+}
+
+/// The idle panel's settings, reached from the corner gear instead of a tab.
+private struct IdleSettingsView: View {
+    @ObservedObject var model: IslandModel
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("SETTINGS")
+                .font(.system(size: 8, weight: .bold, design: .monospaced))
+                .tracking(0.9)
+                .foregroundStyle(IslandPalette.secondary)
+
+            HoverSettingsPanel(model: model)
+                .frame(height: IslandModel.settingsTabContentHeight)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
 

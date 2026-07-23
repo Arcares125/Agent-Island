@@ -450,9 +450,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         // A same-size update with no active spring still needs an exact frame in
         // case the screen origin changed. Non-animated callers always snap safely.
+        // Skipping an identical frame avoids forcing a full panel redraw on every
+        // telemetry heartbeat; SwiftUI invalidates its own content when data moves.
         guard animated, sizeChanged else {
             stopPanelFrameAnimation()
-            panel.setFrame(frame, display: true)
+            if panel.frame != frame {
+                panel.setFrame(frame, display: true)
+            }
             return
         }
 

@@ -38,6 +38,25 @@ enum PixelGlyphs {
         "#.#.#",
     ]
 
+    /// An eighth note: a stem with a flag off the top and a note head bottom-left.
+    static let note = [
+        "...#.",
+        "...##",
+        "...#.",
+        "...#.",
+        "##.#.",
+        "##...",
+    ]
+
+    /// A four-point sparkle — the "having fun" mark over a mascot at play.
+    static let spark = [
+        "..#..",
+        "#.#.#",
+        ".###.",
+        "#.#.#",
+        "..#..",
+    ]
+
     /// A bitmap is usable only if it is rectangular and made of the two symbols
     /// the renderer understands.
     static func isWellFormed(_ rows: [String]) -> Bool {

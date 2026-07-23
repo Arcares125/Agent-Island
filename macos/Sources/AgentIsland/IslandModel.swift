@@ -293,6 +293,8 @@ final class IslandModel: ObservableObject {
     static let hoverCloseDelayKey = "hoverCloseDelay"
     static let defaultHoverOpenDelay: TimeInterval = 0
     static let defaultHoverCloseDelay: TimeInterval = 0.6
+    static let calendarEventNotesKey = "calendarEventNotes"
+    static let calendarEventNotesLimit = 1_000
     static let openDelayPresets: [TimeInterval] = [0, 0.2, 0.4, 0.6, 1.0]
     static let closeDelayPresets: [TimeInterval] = [0.2, 0.4, 0.6, 1.0, 1.5]
     // Volume tug-of-war HUD. The pop-up is on by default (it needs no
@@ -317,12 +319,16 @@ final class IslandModel: ObservableObject {
     /// Body height reserved for the volume HUD *below* the always-overlaid compact
     /// header — covers the "VOLUME" label, the mascot/bar row, the percent readout,
     /// and ExpandedIslandView's HUD padding, with margin.
-    static let volumeHUDContentHeight: CGFloat = 76
+    static let volumeHUDContentHeight: CGFloat = 92
     /// Fixed content heights for the non-list tabs, kept in sync with the tab
     /// views' own frames. The Agents tab sizes to its session list instead.
     static let shelfTabContentHeight: CGFloat = 114
     static let settingsTabContentHeight: CGFloat = 228
     static let soundwaveStripHeight: CGFloat = 34
+    /// The calendar owns the body below the persistent notch header. Keeping this
+    /// fixed prevents a six-week month from growing the island or leaving a short
+    /// month with a large empty tail.
+    static let calendarPanelContentHeight: CGFloat = 304
 
     private let defaults: UserDefaults
 
@@ -345,6 +351,10 @@ final class IslandModel: ObservableObject {
         if defaults.object(forKey: Self.suppressSystemVolumeHUDKey) != nil {
             suppressSystemVolumeHUD = defaults.bool(forKey: Self.suppressSystemVolumeHUDKey)
         }
+        if let savedNotes = defaults.dictionary(forKey: Self.calendarEventNotesKey)
+            as? [String: String] {
+            calendarEventNotes = savedNotes
+        }
         // The agents' config files are the source of truth, not our default:
         // the user may have removed the hook by hand since last launch.
         answerHookEnabled = AgentHookInstaller.Target.allCases.contains {
@@ -362,6 +372,10 @@ final class IslandModel: ObservableObject {
     @Published var isPinnedOpen = false
     @Published var isQuestionPeeking = false
     @Published var isVolumePeeking = false
+    @Published private(set) var isCalendarPresented = false
+    @Published private(set) var calendarMonth = IslandCalendar.startOfMonth(containing: Date())
+    @Published private(set) var calendarSelectedDate = Date()
+    @Published private(set) var calendarEventNotes: [String: String] = [:]
     @Published private(set) var outputVolumeLevel: Float = 0
     @Published private(set) var volumeTugDirection: TugDirection = .none
     @Published var volumePopupEnabled: Bool = IslandModel.defaultVolumePopupEnabled {
@@ -398,6 +412,10 @@ final class IslandModel: ObservableObject {
         didSet { defaults.set(hoverCloseDelay, forKey: Self.hoverCloseDelayKey) }
     }
     @Published var isVisible = true
+    /// Whether the idle/no-session panel is showing its settings instead of the
+    /// resting scene. Reached from the gear in the corner rather than a tab, since
+    /// there is no tab bar when nothing is running.
+    @Published private(set) var showsIdleSettings = false
     @Published private(set) var animationsEnabled = true
     @Published var monitoringEnabled = true
     @Published var selectedAnswer = "Guest checkout"
@@ -461,6 +479,7 @@ final class IslandModel: ObservableObject {
         // not a peek: the other flags all time out or follow the cursor, but
         // nothing is going to happen here until the user actually answers.
         isHovered || isPinnedOpen || isFileDragTargeted || isQuestionPeeking
+            || isCalendarPresented
             || isVolumePeeking || pendingAsk != nil
     }
 
@@ -469,6 +488,13 @@ final class IslandModel: ObservableObject {
     /// normal content instead.
     var isShowingVolumeHUD: Bool {
         isVolumePeeking && !isHovered && !isPinnedOpen && !isFileDragTargeted
+            && !isCalendarPresented
+    }
+
+    /// Calendar presentation is independent of hover so the pointer can travel
+    /// through the month grid without the panel collapsing underneath it.
+    var isShowingCalendar: Bool {
+        isCalendarPresented && isExpanded
     }
 
     /// The now-playing equalizer shows while the visualizer is enabled and audio
@@ -477,11 +503,39 @@ final class IslandModel: ObservableObject {
         musicVisualizerEnabled && isAudioPlaying
     }
 
-    /// On a notch Mac the equalizer lives in the notch's right wing, always
-    /// visible. Without a notch there is no wing, so it falls back to a strip
-    /// inside the expanded dashboard.
+    /// On a notch Mac the equalizer lives beside the steady idle clock. During
+    /// active sessions the wing alternates session count and time instead.
+    /// Without a notch there is no wing, so it falls back to a dashboard strip.
     var isShowingSoundwaveStrip: Bool {
         isShowingSoundwave && !isNotchAttached
+    }
+
+    /// The resting home screen: nothing is being tracked and the tracked phase is
+    /// idle. This is the only place the settings gear and the mascot playground
+    /// appear, so both the layout and the views test against it.
+    var isNoSessionIdle: Bool {
+        !(monitoringEnabled && !sessions.isEmpty) && phase == .idle
+    }
+
+    /// Whether the idle panel is currently swapped to settings. Guarded so a stale
+    /// flag can never grow the panel outside the state the gear lives in.
+    var isShowingIdleSettings: Bool {
+        showsIdleSettings && isExpanded && isNoSessionIdle && !isShowingVolumeHUD
+    }
+
+    /// Idle panel height when it is showing settings instead of the scene.
+    ///
+    /// Built from the same pieces the view lays out: the always-overlaid compact
+    /// header, ExpandedIslandView's idle padding (14 top + 18 bottom), a settings
+    /// title row, and the fixed settings panel — so the panel is never clipped.
+    private var idleSettingsExpandedHeight: CGFloat {
+        persistentHeaderSize.height + 14 + 18 + 20 + Self.settingsTabContentHeight
+    }
+
+    /// The idle panel grows to fit the settings when the gear is open, and stays
+    /// at the compact resting size — room for the mascot scene — otherwise.
+    private var idleExpandedSize: IslandSize {
+        IslandSize(width: 470, height: isShowingIdleSettings ? idleSettingsExpandedHeight : 224)
     }
 
     var liveSessionListHeight: CGFloat {
@@ -525,9 +579,20 @@ final class IslandModel: ObservableObject {
         )
     }
 
+    var calendarExpandedSize: IslandSize {
+        IslandSize(
+            width: max(480, persistentHeaderSize.width),
+            height: persistentHeaderSize.height + Self.calendarPanelContentHeight
+        )
+    }
+
     var preferredSize: IslandSize {
         if isShowingVolumeHUD {
             return volumeHUDSize
+        }
+
+        if isShowingCalendar {
+            return calendarExpandedSize
         }
 
         if let notchPresentation {
@@ -537,7 +602,7 @@ final class IslandModel: ObservableObject {
                 }
 
                 switch phase {
-                case .idle: return IslandSize(width: 470, height: 210)
+                case .idle: return idleExpandedSize
                 case .thinking: return IslandSize(width: 560, height: 350)
                 case .question: return IslandSize(width: 560, height: 320)
                 case .complete: return IslandSize(width: 560, height: 334)
@@ -560,7 +625,7 @@ final class IslandModel: ObservableObject {
 
         if isExpanded {
             switch phase {
-            case .idle: return IslandSize(width: 470, height: 210)
+            case .idle: return idleExpandedSize
             case .thinking: return IslandSize(width: 560, height: 350)
             case .complete: return IslandSize(width: 560, height: 334)
             case .question: return IslandSize(width: 560, height: 320)
@@ -661,13 +726,20 @@ final class IslandModel: ObservableObject {
         return "\(minutes)M"
     }
 
+    /// Shared: formatter construction is expensive, and `resetText` is
+    /// re-evaluated on every usage-summary render. Main-actor confinement of the
+    /// model makes reusing the (non-thread-safe) formatter sound.
+    private static let resetFormatter: RelativeDateTimeFormatter = {
+        let formatter = RelativeDateTimeFormatter()
+        formatter.unitsStyle = .abbreviated
+        return formatter
+    }()
+
     var resetText: String? {
         guard let timestamp = rateLimitResetsAt else { return nil }
         let resetDate = Date(timeIntervalSince1970: TimeInterval(timestamp))
         if resetDate <= Date() { return "now" }
-        let formatter = RelativeDateTimeFormatter()
-        formatter.unitsStyle = .abbreviated
-        return formatter.localizedString(for: resetDate, relativeTo: Date())
+        return Self.resetFormatter.localizedString(for: resetDate, relativeTo: Date())
     }
 
     func formattedTokens(_ tokens: Int64?) -> String {
@@ -690,6 +762,10 @@ final class IslandModel: ObservableObject {
         if hovered {
             endQuestionPeek()
             endVolumePeek()
+        } else if !isPinnedOpen {
+            // Collapsing drops the gear panel so the next open shows the scene, not
+            // a settings view the user never returned to.
+            showsIdleSettings = false
         }
         layoutDidChange?()
     }
@@ -708,6 +784,9 @@ final class IslandModel: ObservableObject {
     /// or pins in the meantime. The question stays visible in the notch's accent.
     func beginQuestionPeek() {
         questionPeekTimer?.invalidate()
+        // A blocked agent is more urgent than a utility panel. Closing the
+        // calendar preserves the existing promise that questions reveal here.
+        isCalendarPresented = false
         isQuestionPeeking = true
         let timer = Timer.scheduledTimer(
             withTimeInterval: Self.questionPeekDuration,
@@ -737,7 +816,8 @@ final class IslandModel: ObservableObject {
         // Don't raise the transient HUD while the user is already engaged with the
         // island (hover / pin / file-drag): it would be masked now and then leak in
         // as stale content when that interaction ends within the peek window.
-        guard !isHovered, !isPinnedOpen, !isFileDragTargeted else { return }
+        guard !isHovered, !isPinnedOpen, !isFileDragTargeted,
+              !isCalendarPresented else { return }
         outputVolumeLevel = min(max(level, 0), 1)
         volumeTugDirection = direction
         beginVolumePeek()
@@ -900,6 +980,81 @@ final class IslandModel: ObservableObject {
         layoutDidChange?()
     }
 
+    /// Open or close the calendar from the compact right wing. Opening starts at
+    /// the current month; closing restores whichever agent/shelf/settings tab was
+    /// already selected underneath it.
+    func toggleCalendar() {
+        // Agent questions keep priority over utilities. The calendar is closed as
+        // soon as an ask arrives, and cannot cover that ask while it is pending.
+        guard pendingAsk == nil else { return }
+        isCalendarPresented.toggle()
+        if isCalendarPresented {
+            let now = Date()
+            calendarMonth = IslandCalendar.startOfMonth(containing: now)
+            calendarSelectedDate = now
+            endQuestionPeek()
+            endVolumePeek()
+        }
+        layoutDidChange?()
+    }
+
+    func moveCalendarMonth(by offset: Int) {
+        guard offset != 0 else { return }
+        calendarMonth = IslandCalendar.month(byAdding: offset, to: calendarMonth)
+    }
+
+    func selectCalendarDate(_ date: Date) {
+        calendarSelectedDate = date
+        calendarMonth = IslandCalendar.startOfMonth(containing: date)
+    }
+
+    func showCalendarToday() {
+        let now = Date()
+        calendarSelectedDate = now
+        calendarMonth = IslandCalendar.startOfMonth(containing: now)
+    }
+
+    func calendarEvent(
+        on date: Date,
+        calendar: Calendar = .autoupdatingCurrent
+    ) -> String? {
+        calendarEventNotes[IslandCalendar.eventDayKey(for: date, calendar: calendar)]
+    }
+
+    /// Store one short, private note per local calendar day. UserDefaults keeps
+    /// this completely inside Agent Island; a hard cap prevents accidental
+    /// unbounded preference growth over years of use.
+    func saveCalendarEvent(
+        _ title: String,
+        on date: Date,
+        calendar: Calendar = .autoupdatingCurrent
+    ) {
+        let key = IslandCalendar.eventDayKey(for: date, calendar: calendar)
+        let cleaned = IslandCalendar.sanitizedEventTitle(title)
+        var notes = calendarEventNotes
+
+        if cleaned.isEmpty {
+            notes.removeValue(forKey: key)
+        } else {
+            if notes[key] == nil,
+               notes.count >= Self.calendarEventNotesLimit,
+               let oldestCalendarDay = notes.keys.sorted().first {
+                notes.removeValue(forKey: oldestCalendarDay)
+            }
+            notes[key] = cleaned
+        }
+
+        guard notes != calendarEventNotes else { return }
+        calendarEventNotes = notes
+        defaults.set(notes, forKey: Self.calendarEventNotesKey)
+    }
+
+    /// Flip the idle panel between the resting scene and settings.
+    func toggleIdleSettings() {
+        showsIdleSettings.toggle()
+        layoutDidChange?()
+    }
+
     func setHoverOpenDelay(_ value: TimeInterval) {
         guard hoverOpenDelay != value else { return }
         hoverOpenDelay = value
@@ -942,6 +1097,9 @@ final class IslandModel: ObservableObject {
         let previousPhase = phase
         let previousSessions = Dictionary(uniqueKeysWithValues: sessions.map { ($0.id, $0.state) })
         sessions = snapshot.sessions ?? []
+        // Work arriving retires the idle gear panel; it belongs to the resting
+        // state only, and the dashboard has its own settings tab.
+        if !sessions.isEmpty { showsIdleSettings = false }
         if let expandedSessionID,
            !sessions.contains(where: { $0.id == expandedSessionID }) {
             self.expandedSessionID = nil
@@ -1085,6 +1243,7 @@ extension IslandModel: AudioMonitoringDelegate {
     /// dropped rather than shown as a card with nothing to click.
     func presentAsk(_ ask: AskRequestMessage) {
         guard !ask.question.options.isEmpty else { return }
+        isCalendarPresented = false
         pendingAsk = ask
         // The agent is blocked from this moment, so open the island now rather
         // than waiting for the next telemetry snapshot to notice.

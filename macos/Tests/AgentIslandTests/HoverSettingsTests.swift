@@ -87,6 +87,21 @@ final class HoverSettingsTests: XCTestCase {
         )
     }
 
+    /// The idle gear belongs to the resting state only — with a live session the
+    /// dashboard owns settings through its tab, so the gear panel must stay shut.
+    @MainActor
+    func testIdleSettingsStaysHiddenWhileSessionsRun() {
+        let model = IslandModel(defaults: makeDefaults())
+        model.apply(thinkingSessionSnapshot())
+        model.setHovered(true)
+
+        model.toggleIdleSettings()
+        XCTAssertFalse(
+            model.isShowingIdleSettings,
+            "A running session is not the no-session idle state the gear lives in"
+        )
+    }
+
     @MainActor
     func testPresetsAreDistinctAndOrdered() {
         XCTAssertEqual(IslandModel.openDelayPresets, [0, 0.2, 0.4, 0.6, 1.0])

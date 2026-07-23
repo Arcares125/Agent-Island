@@ -336,7 +336,6 @@ impl SessionTracker {
     }
 
     fn rediscover(&mut self, detected_agents: &[DetectedAgent]) {
-        const SESSION_RETENTION: Duration = Duration::from_secs(30 * 60);
         const MAX_TRACKED_SESSIONS: usize = 8;
 
         self.last_discovery = Some(Instant::now());
@@ -364,10 +363,8 @@ impl SessionTracker {
             };
             let is_process_candidate = *rank < provider_processes;
             *rank += 1;
-            let is_recent = SystemTime::now()
-                .duration_since(candidate.modified)
-                .is_ok_and(|age| age <= SESSION_RETENTION);
-            is_process_candidate || is_recent
+            let age = SystemTime::now().duration_since(candidate.modified).ok();
+            session_is_retained(is_process_candidate, age, IDLE_SESSION_GRACE)
         });
         candidates = select_bounded_candidates(
             candidates,
@@ -449,6 +446,30 @@ impl SessionTracker {
             revision.wrapping_mul(31).wrapping_add(reader.revision)
         })
     }
+}
+
+/// How long a session with no live process is kept before it is dropped.
+///
+/// A session whose agent process is still running is retained by that process
+/// regardless of this bound; this governs only a transcript whose process is
+/// gone — a closed or killed terminal. It is short on purpose: long enough to
+/// ride out a single missed process scan and to let a just-finished session show
+/// its result for a moment, but short enough that a closed terminal clears in
+/// about half a minute instead of lingering for half an hour as a phantom
+/// "1 session, idle".
+const IDLE_SESSION_GRACE: Duration = Duration::from_secs(30);
+
+/// Whether a discovered transcript still counts as a session.
+///
+/// Kept if it belongs to a live process, or — for one whose process is gone —
+/// only while its last activity is inside the grace window. `age` is `None` when
+/// the file's timestamp is in the future, which cannot be trusted as recent.
+fn session_is_retained(
+    is_process_candidate: bool,
+    age: Option<Duration>,
+    grace: Duration,
+) -> bool {
+    is_process_candidate || age.is_some_and(|age| age <= grace)
 }
 
 fn select_bounded_candidates(
@@ -2035,6 +2056,39 @@ mod tests {
                 PathBuf::from("/Users/test/.claude2/projects"),
             ]
         );
+    }
+
+    /// A session backed by a running process is always kept, no matter how long
+    /// its transcript has been quiet — an idle-but-open agent is still a session.
+    #[test]
+    fn a_live_session_is_kept_however_stale_its_transcript() {
+        assert!(session_is_retained(true, Some(Duration::from_secs(3_600)), IDLE_SESSION_GRACE));
+        assert!(session_is_retained(true, None, IDLE_SESSION_GRACE));
+    }
+
+    /// Regression: killing the terminal left the session counted for 30 minutes.
+    /// With its process gone, a transcript older than the grace must be dropped so
+    /// the island settles to "no sessions" instead of a phantom "1 session, idle".
+    #[test]
+    fn a_killed_session_is_dropped_once_past_the_grace() {
+        assert!(
+            !session_is_retained(false, Some(IDLE_SESSION_GRACE + Duration::from_secs(1)), IDLE_SESSION_GRACE),
+            "a closed terminal must not linger past the grace window"
+        );
+    }
+
+    /// A just-closed session stays briefly so its final state is still readable
+    /// and a single missed process scan cannot blink it out of existence.
+    #[test]
+    fn a_recently_closed_session_survives_the_grace() {
+        assert!(session_is_retained(false, Some(Duration::from_secs(5)), IDLE_SESSION_GRACE));
+    }
+
+    /// A future timestamp is not evidence of recent activity, so a process-less
+    /// transcript claiming one is dropped rather than trusted.
+    #[test]
+    fn a_future_timestamp_does_not_keep_a_dead_session() {
+        assert!(!session_is_retained(false, None, IDLE_SESSION_GRACE));
     }
 
     #[test]

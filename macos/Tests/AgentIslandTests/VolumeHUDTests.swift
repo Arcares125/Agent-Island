@@ -102,7 +102,7 @@ final class VolumeHUDTests: XCTestCase {
     @MainActor
     func testVolumeHUDSizeFitsOverlaidHeader() {
         let model = makeModel()
-        let minBodyNeeded: CGFloat = 66  // compact "VOLUME %" label + mascot/bar row + padding
+        let minBodyNeeded: CGFloat = 82  // title + living rope arena + result caption + padding
 
         model.handleVolumeChange(level: 0.5, delta: 0.1)
         XCTAssertTrue(model.isShowingVolumeHUD)

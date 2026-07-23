@@ -1,0 +1,76 @@
+name: Release
+
+# Cutting a release is deliberate, not something that fires on every push: tag a
+# version (e.g. `v2.3.0`) and this builds the macOS app, packages a
+# drag-to-install DMG, and attaches it to a public GitHub Release anyone can
+# download. It can also be run by hand from the Actions tab.
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Version tag to release (e.g. v2.3.0)'
+        required: true
+
+permissions:
+  contents: write # create the Release and upload the DMG asset
+
+jobs:
+  macos:
+    name: macOS app (Apple Silicon)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve version
+        id: meta
+        run: |
+          set -euo pipefail
+          TAG="${{ github.event.inputs.tag || github.ref_name }}"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Toolchain
+        run: rustc --version && cargo --version && swift --version
+
+      # A public release must not ship a red build, so the logic is gated before
+      # anything is packaged.
+      - name: Test
+        run: |
+          cargo test --manifest-path agent-core/Cargo.toml
+          DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer \
+            swift test --scratch-path .build-tests --cache-path .build/swiftpm-cache
+
+      - name: Build the app bundle
+        run: zsh scripts/build-app.sh
+
+      # A drag-to-install DMG: the app beside an Applications symlink, so the user
+      # just drags one onto the other. Ad-hoc signed (no Apple identity on the
+      # runner), which is why the download needs a one-time approval on first open.
+      - name: Package DMG
+        id: dmg
+        run: |
+          set -euo pipefail
+          DMG="Agent-Island-${{ steps.meta.outputs.version }}-arm64.dmg"
+          STAGE="$(mktemp -d)"
+          cp -R "dist/Agent Island.app" "$STAGE/"
+          ln -s /Applications "$STAGE/Applications"
+          hdiutil create -volname "Agent Island" \
+            -srcfolder "$STAGE" -ov -format UDZO "$DMG"
+          echo "path=$DMG" >> "$GITHUB_OUTPUT"
+
+      - name: Publish Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          TAG="${{ steps.meta.outputs.tag }}"
+          NOTES="macOS (Apple Silicon, macOS 14+) build. This is a free, independent build, so the first launch needs a one-time approval — see **Install (no coding required)** in the README."
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" "${{ steps.dmg.outputs.path }}" --clobber
+          else
+            gh release create "$TAG" "${{ steps.dmg.outputs.path }}" \
+              --title "Agent Island $TAG" \
+              --notes "$NOTES"
+          fi

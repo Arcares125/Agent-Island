@@ -11,8 +11,31 @@
 </p>
 
 <p align="center">
-  macOS 14+ · Native SwiftUI/AppKit · Dependency-free Rust helper · Local-first · Version 2.3.0 (build 51)
+  macOS 14+ · Native SwiftUI/AppKit · Dependency-free Rust helper · Local-first · Version 2.5.1 (build 59)
 </p>
+
+---
+
+## Install (no coding required)
+
+You don't need to build anything or touch a terminal.
+
+1. Open the **[Releases page](../../releases/latest)** and download **`Agent-Island-<version>-arm64.dmg`** (Apple Silicon — M1/M2/M3/M4/M5).
+2. Double-click the downloaded `.dmg`, then drag **Agent Island** onto the **Applications** folder.
+3. Open **Agent Island** from your Applications folder.
+
+Because this is a free, independent build (not signed through Apple's paid Developer program), macOS shows a warning the **first time** you open it. This is expected — you approve it once:
+
+- Try to open the app (the warning appears — that's normal).
+- Go to **System Settings → Privacy & Security**, scroll to the bottom, and click **Open Anyway** next to “Agent Island”, then confirm with **Open**.
+- If macOS still blocks it, open **Terminal** and paste this one line, then open the app again:
+  ```bash
+  xattr -dr com.apple.quarantine "/Applications/Agent Island.app"
+  ```
+
+You only do this once. After that it launches like any other app and lives in your menu bar / notch.
+
+> Requires **macOS 14 or newer** on **Apple Silicon**. Intel builds are not published yet — on an Intel Mac, build from source (below).
 
 ---
 
@@ -47,8 +70,9 @@ The production application is fully native:
 | Connected detail card | Joins the selected summary row, prompt strip, safe activity sheet, changed files, and metric rail into one compact visual story. |
 | Activity and files | Keeps a bounded private scroll of safe action labels and changed-file basenames. |
 | One-hour file shelf | Holds up to nine dropped files as cards — real Finder icon, name, type and size — for quick paste/drag reuse, then deletes the copies automatically. |
+| Notch clock and calendar | Alternates the compact right wing between active-session count and local date/time; clicking either face opens a navigable six-week month calendar with private dated notes. |
 | Music visualizer | Optional five-bar chromatic equalizer in the notch's right wing, driven by a real FFT of system audio. Off by default; costs nothing when off or silent. |
-| Volume tug-of-war | Changing system volume briefly pops the island open with the Codex and Claude mascots tugging a level bar toward whoever "won" the last change. |
+| Living Rope volume HUD | Changing volume triggers one finite brace–pull–tension–settle performance: Codex and Claude tug a straight rope with sixteen exact knots and a truthful position marker. |
 | One volume overlay | Optionally suppresses the macOS volume HUD so only the island's is on screen. Needs Accessibility; off by default. |
 | In-island settings | A scrolling Settings tab for hover timing, the media toggles, answering, and HUD suppression, persisted in `UserDefaults`. |
 | Recognizable app icon | Combines the Codex and Claude mascots in one dark purple/orange macOS icon for Finder, Applications, Activity Monitor, notifications, and system UI. |
@@ -66,9 +90,13 @@ The compact surface contains:
 - a centered left-wing group with up to three recently active mascots;
 - a readable status label such as **Working**, **Input**, or **Done**;
 - the physical camera housing in the obscured center;
-- a centered right-wing total such as **8 sessions**.
+- a centered right wing that alternates every five seconds between **8 sessions** and local date/time.
 
-The newest mascot remains the largest and is the only compact mascot that animates. The second and third mascots are smaller, static cached images. More than three sessions can still be tracked—the right wing always reports the real total.
+The newest mascot remains the largest and is the only compact mascot that animates. The second and third mascots are smaller, static cached images. More than three sessions can still be tracked—the session face always reports the real total. With no active session, date/time stays visible instead of alternating, and the optional soundwave shares that wing while audio is playing.
+
+Click either right-wing face to hold open a native-styled month calendar. It keeps a fixed six-week grid, shows adjacent-month days without changing panel height, supports previous/next month navigation, highlights today and the selected date, and offers **Today** plus a close button.
+
+Double-click a date to add one short event note such as **Birthday**. Return or **Save** stores it, an orange dot marks the day, double-clicking again edits it, and **Remove** deletes it. Notes are single-line, capped at 80 characters and 1,000 dates, and live only in Agent Island's local preferences. The app reads the Mac's locale/time-zone settings but never accesses or syncs Apple Calendar events, so it needs no Calendar permission.
 
 Idle sessions do not leave a distracting wide overlay. On a display without a notch, the app falls back to a top-center capsule below the menu bar.
 
@@ -187,7 +215,18 @@ killall Finder
 ```
 
 > [!IMPORTANT]
-> Local builds are ad-hoc signed for use on the same Mac. Public distribution still requires Developer ID signing, notarization, and an installer/DMG workflow.
+> Local builds are ad-hoc signed for use on the same Mac. The public DMG on the Releases page is ad-hoc signed too — not through Apple's paid Developer program — so its first launch needs a one-time approval (see **Install (no coding required)** above). A frictionless double-click install would require Developer ID signing plus notarization.
+
+### Publish a downloadable release
+
+Releases are cut by pushing a version tag. GitHub then builds the app, packages the DMG, and attaches it to a public Release automatically — see `.github/workflows/release.yml`:
+
+```bash
+git tag v2.5.1
+git push origin v2.5.1
+```
+
+The workflow runs the sidecar and app tests, builds `dist/Agent Island.app` on a macOS runner, packages `Agent-Island-<version>-arm64.dmg`, and publishes it to the Releases page. You can also run it by hand from the **Actions** tab (enter the tag). No secrets or Apple account are required.
 
 ### Build and launch without installing
 
@@ -414,9 +453,11 @@ Every failure path is silent and non-blocking, so the agent falls through to its
 
 Two optional flourishes live under the island's **Settings** tab. Both are pure Swift on top of Apple's own frameworks (Core Audio, Accelerate, AppKit) and add no dependency.
 
-### Volume tug-of-war
+### Living Rope volume tug-of-war
 
-Enable **VOLUME POP-UP**. Changing the system output volume briefly pops the island open into a compact HUD: the Codex mascot on the left, the Claude mascot on the right, and a ten-segment level bar between them. Whichever direction you moved the volume, that mascot leans in and scales up as if it won the tug.
+Enable **VOLUME POP-UP**. Changing system output volume briefly opens a compact rope arena: Codex braces on the left, Claude braces on the right, sixteen illuminated knots preserve the exact macOS volume steps, and a pale diamond marks the absolute level. Each input plays one finite brace → pull → tension-release → settle performance. The rope stays perfectly horizontal; only its thickness/glow and the character poses carry the tug. The winner plants its feet and leans outward while the opponent slips toward it; minimum and maximum receive distinct result captions.
+
+The performance ends after roughly three quarters of a second and starts no permanent timer or idle animation. Holding a volume key cancels the previous sequence and begins the newest pull from the latest real level. With Reduce Motion enabled, the rope, knots, marker, percentage, and result remain visible while character transforms and tension animation are skipped.
 
 The peek is transient and yields to real interaction — hovering, pinning, or starting a file drag cancels it, and it never re-surfaces stale state afterwards. Volume is read through `kAudioDevicePropertyVolumeScalar`, which requires **no permission of any kind**.
 
@@ -429,7 +470,7 @@ Enable **MUSIC VISUALIZER** (off by default; labelled *needs audio access*). It 
 | Detection | Listens to `kAudioDevicePropertyDeviceIsRunningSomewhere` to know whether *something* is producing sound, and shows a `♪` glyph in the notch. | None |
 | Visualization | Opens a Core Audio process tap (macOS 14.2+) into a private aggregate device, captures output on the HAL thread into a lock-guarded ring buffer, runs a reusable vDSP real-FFT, and reduces it to five log-spaced, attack/decay-smoothed bars. | System audio capture |
 
-The five bars render in the notch's right wing as translucent capsules whose hues fan across the colour wheel and rotate slowly. On a Mac without a notch there is no wing, so the same equalizer appears as a strip inside the expanded dashboard instead.
+With no agent session, the five bars render beside the steady notch clock as translucent capsules whose hues fan across the colour wheel and rotate slowly. During active sessions the wing instead alternates session count and date/time. On a Mac without a notch there is no wing, so the equalizer appears as a strip inside the expanded dashboard instead.
 
 Audio is analysed **in memory, frame by frame, and discarded**. Nothing is recorded, buffered to disk, or transmitted, and the app never asks which track is playing — there is no `MediaRemote` use and no track title, artist, or artwork anywhere in the code.
 
@@ -724,7 +765,7 @@ The current suite covers:
 DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer swift test
 ```
 
-121 unit tests cover the island model's state machine, hover/expand geometry, volume tug-of-war routing, spectrum math and smoothing, shelf formatting, the temporary file shelf's lifecycle, the answer transport's validation boundary, hook config merging and removal, pixel glyph bitmaps, and the volume key decoder.
+154 unit tests cover the island model's state machine, hover/expand geometry, calendar grids/navigation/presentation priority, private event-note persistence and bounds, compact face alternation, straight Living Rope geometry and volume routing, fine-grained markers and edge reactions, spectrum math and smoothing, shelf formatting, the temporary file shelf's lifecycle, the answer transport's validation boundary, hook config merging and removal, pixel glyph bitmaps, and the volume key decoder.
 
 > [!TIP]
 > `DEVELOPER_DIR` is required when `xcode-select -p` points at the Command Line Tools, which ship no XCTest. If `swift test` reports `no such module 'XCTest'`, that is the cause.
@@ -786,12 +827,14 @@ dynamic_island/
 │   │   ├── SpectrumAnalyzer.swift       # reusable vDSP real-FFT
 │   │   ├── SpectrumMath.swift           # bins → bars, smoothing, hue phase
 │   │   ├── SoundwaveView.swift          # SpectrumStore + Canvas equalizer
+│   │   ├── CalendarSupport.swift        # month-grid maths, clock formatting, event keys
+│   │   ├── CalendarPanelView.swift      # fixed-height month calendar + local event editor
 │   │   ├── VolumeMath.swift             # tug direction, lit segments
-│   │   ├── VolumeHUDView.swift          # mascot tug-of-war HUD
+│   │   ├── VolumeHUDView.swift          # finite Living Rope volume performance
 │   │   ├── ShelfFormatting.swift        # size and type labels
 │   │   ├── TemporaryFileShelf.swift     # one-hour file shelf store
 │   │   └── Resources/
-│   └── Tests/AgentIslandTests/          # 121 unit tests
+│   └── Tests/AgentIslandTests/          # 154 unit tests
 ├── scripts/
 │   ├── build-app.sh
 │   ├── make-app-icon.swift
@@ -817,8 +860,8 @@ Every installed build also increments `CFBundleVersion`.
 Current release:
 
 ```text
-CFBundleShortVersionString = 2.3.0
-CFBundleVersion = 51
+CFBundleShortVersionString = 2.5.1
+CFBundleVersion = 59
 ```
 
 ## Design principles

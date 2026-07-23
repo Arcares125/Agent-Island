@@ -8,6 +8,8 @@ final class PixelGlyphTests: XCTestCase {
         ("check", PixelGlyphs.check),
         ("sleep", PixelGlyphs.sleep),
         ("ellipsis", PixelGlyphs.ellipsis),
+        ("note", PixelGlyphs.note),
+        ("spark", PixelGlyphs.spark),
     ]
 
     /// A ragged bitmap silently draws a torn glyph rather than failing, so the
