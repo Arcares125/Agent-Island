@@ -2382,8 +2382,33 @@ private struct IslandButton: View {
     }
 }
 
-private enum MascotImageStore {
+private final class SpriteBundleToken {}
+
+/// Internal rather than private so the sprite fallback can be tested — the path
+/// that trapped here took the whole app down on launch.
+enum MascotImageStore {
     static let cache = NSCache<NSString, NSImage>()
+
+    /// The bundled sprites, resolved without `Bundle.module`.
+    ///
+    /// SwiftPM's generated accessor calls `fatalError` when the resource bundle is
+    /// missing, which turns a packaging slip into an unrecoverable crash *loop*:
+    /// the notch draws a mascot on launch, so the app dies before the user can
+    /// reach any setting to undo whatever exposed it. A missing sprite is a
+    /// cosmetic problem and must degrade like one.
+    static let spriteBundle: Bundle? = {
+        let name = "AgentIsland_AgentIsland.bundle"
+        let roots = [
+            Bundle.main.resourceURL,
+            Bundle(for: SpriteBundleToken.self).resourceURL,
+            Bundle.main.bundleURL,
+        ]
+        for case let root? in roots {
+            if let bundle = Bundle(url: root.appendingPathComponent(name)) { return bundle }
+        }
+        // Resources sitting loose beside the binary (swift run, tests).
+        return Bundle(for: SpriteBundleToken.self)
+    }()
 
     static func image(
         provider: AgentProvider,
@@ -2406,7 +2431,7 @@ private enum MascotImageStore {
             return uploaded
         }
 
-        guard let url = Bundle.module.url(forResource: provider.assetName, withExtension: "png"),
+        guard let url = spriteBundle?.url(forResource: provider.assetName, withExtension: "png"),
               let image = NSImage(contentsOf: url) else {
             return NSImage(size: NSSize(width: fallbackSize, height: fallbackSize))
         }

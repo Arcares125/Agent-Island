@@ -44,10 +44,17 @@ cp "$ROOT_DIR/.build/release/AgentIsland" "$MACOS_DIR/AgentIsland"
 cp "$ROOT_DIR/agent-core/target/release/agent-core" "$HELPERS_DIR/agent-core"
 cp "$ROOT_DIR/macos/Info.plist" "$CONTENTS_DIR/Info.plist"
 
+# The mascot sprites live here. Skipping this quietly used to produce an app that
+# looked fine until something needed a bundled sprite, then trapped inside
+# Bundle.module — a crash loop on launch, because the notch draws one immediately.
+# A missing bundle is a broken build, so fail here rather than ship it.
 RESOURCE_BUNDLE="$ROOT_DIR/.build/release/AgentIsland_AgentIsland.bundle"
-if [[ -d "$RESOURCE_BUNDLE" ]]; then
-    cp -R "$RESOURCE_BUNDLE" "$RESOURCES_DIR/"
+if [[ ! -d "$RESOURCE_BUNDLE" ]]; then
+    echo "Resource bundle missing: $RESOURCE_BUNDLE" >&2
+    echo "The build cannot be packaged without the mascot sprites." >&2
+    exit 1
 fi
+cp -R "$RESOURCE_BUNDLE" "$RESOURCES_DIR/"
 
 ICONSET_DIR="$ROOT_DIR/.build/AgentIsland.iconset"
 ICON_FILE="$ROOT_DIR/.build/AgentIsland.icns"
