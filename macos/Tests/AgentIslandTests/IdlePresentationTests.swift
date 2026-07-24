@@ -35,38 +35,50 @@ final class IdlePresentationTests: XCTestCase {
         XCTAssertEqual(model.preferredSize.width, 330, accuracy: 0.5)
     }
 
-    /// The gear opens settings in place of the resting scene, which grows the
-    /// panel; collapsing the island drops it again so the next open shows the scene.
+    /// Regression: while resting, the island used to show a scene with only a
+    /// settings gear, so the shelf could not be opened without starting an agent.
+    /// The resting state now routes through the same tab bar as a live session.
     @MainActor
-    func testIdleSettingsGearExpandsPanelThenResetsOnCollapse() {
+    func testRestingIslandReachesEveryTab() {
         let model = IslandModel()
         model.setPhase(.idle)
         model.setHovered(true)
 
-        XCTAssertFalse(model.isShowingIdleSettings)
+        XCTAssertTrue(model.isNoSessionIdle)
+        XCTAssertTrue(model.showsTabDashboard, "Resting must reach the tab bar")
+
+        for tab in IslandTab.allCases {
+            model.selectTab(tab)
+            XCTAssertEqual(model.selectedTab, tab)
+            XCTAssertTrue(model.showsTabDashboard, "\(tab.label) stays reachable while resting")
+        }
+    }
+
+    /// Each tab sizes the resting panel to its own content, the same as it does
+    /// with a live session — the shelf and settings are much taller than the scene.
+    @MainActor
+    func testRestingPanelSizesToTheSelectedTab() {
+        let model = IslandModel()
+        model.setPhase(.idle)
+        model.setHovered(true)
+
+        model.selectTab(.agents)
         let restingHeight = model.preferredSize.height
 
-        model.toggleIdleSettings()
-        XCTAssertTrue(model.isShowingIdleSettings)
+        model.selectTab(.settings)
         XCTAssertGreaterThan(
             model.preferredSize.height,
             restingHeight,
             "Settings needs more room than the resting scene"
         )
-
-        model.setHovered(false)
-        XCTAssertFalse(model.isShowingIdleSettings, "Collapsing hides and resets the gear panel")
     }
 
-    /// The gear is idle-only: while the island is collapsed there is no panel to
-    /// grow, so the flag must not leak into the compact size.
+    /// The resting scene needs a box of its own; an empty session list would
+    /// otherwise collapse the Agents tab to nothing.
     @MainActor
-    func testIdleSettingsNeverShowsWhileCollapsed() {
+    func testRestingAgentsTabReservesSceneHeight() {
         let model = IslandModel()
         model.setPhase(.idle)
-        model.toggleIdleSettings()
-
-        XCTAssertFalse(model.isExpanded)
-        XCTAssertFalse(model.isShowingIdleSettings, "A collapsed idle island shows no settings")
+        XCTAssertEqual(model.liveSessionListHeight, IslandModel.restingSceneHeight)
     }
 }

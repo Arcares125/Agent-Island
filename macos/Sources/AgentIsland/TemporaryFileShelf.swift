@@ -17,11 +17,28 @@ struct TemporaryFileShelfItem: Identifiable, Equatable {
 @MainActor
 final class TemporaryFileShelf: ObservableObject {
     static let maximumItemCount = 9
-    static let lifetime: TimeInterval = 60 * 60
+    /// Retention windows offered in Settings. A day is the ceiling: these are
+    /// plaintext copies parked in a temp directory, so "temporary" has to stay
+    /// meaningful even at the most generous setting.
+    nonisolated static let retentionHourPresets = [1, 4, 12, 24]
+    nonisolated static let defaultRetentionHours = 1
     nonisolated static let maximumFileSize: Int64 = 1_073_741_824
 
+    /// The stored value reaches us from UserDefaults, which the user can edit by
+    /// hand, so it is matched against the presets rather than merely range-checked.
+    nonisolated static func clampRetentionHours(_ hours: Int) -> Int {
+        retentionHourPresets.contains(hours) ? hours : defaultRetentionHours
+    }
+
     @Published private(set) var items: [TemporaryFileShelfItem] = []
-    @Published private(set) var statusMessage = "DROP FILES HERE · COPIES EXPIRE IN 1 HOUR"
+    @Published private(set) var statusMessage: String
+    @Published private(set) var retentionHours: Int
+
+    var lifetime: TimeInterval { TimeInterval(retentionHours) * 60 * 60 }
+
+    private var idleStatusMessage: String {
+        "DROP FILES HERE · COPIES EXPIRE IN \(shelfRetentionLabel(hours: retentionHours))"
+    }
 
     private let rootDirectory: URL
     private let workQueue = DispatchQueue(
@@ -31,13 +48,34 @@ final class TemporaryFileShelf: ObservableObject {
     private var pendingImportCount = 0
     private var expirationTimer: Timer?
 
-    init(fileManager: FileManager = .default, rootDirectory: URL? = nil) {
+    init(
+        fileManager: FileManager = .default,
+        rootDirectory: URL? = nil,
+        retentionHours: Int = TemporaryFileShelf.defaultRetentionHours
+    ) {
+        let clamped = Self.clampRetentionHours(retentionHours)
+        self.retentionHours = clamped
+        self.statusMessage =
+            "DROP FILES HERE · COPIES EXPIRE IN \(shelfRetentionLabel(hours: clamped))"
         self.rootDirectory = rootDirectory
             ?? fileManager.temporaryDirectory
                 .appendingPathComponent("com.xiao.agentisland", isDirectory: true)
                 .appendingPathComponent("file-shelf", isDirectory: true)
         prepareRootDirectory(fileManager: fileManager)
         reloadItems(fileManager: fileManager)
+    }
+
+    /// Deadlines are derived from each copy's creation time, so a new window
+    /// applies to files already on the shelf as well as future drops. Shortening
+    /// it therefore sweeps anything that is already past the new deadline.
+    func setRetentionHours(_ hours: Int) {
+        let clamped = Self.clampRetentionHours(hours)
+        guard clamped != retentionHours else { return }
+        retentionHours = clamped
+        reloadItems()
+        statusMessage = items.isEmpty
+            ? idleStatusMessage
+            : "COPIES NOW EXPIRE IN \(shelfRetentionLabel(hours: clamped))"
     }
 
     @discardableResult
@@ -146,9 +184,7 @@ final class TemporaryFileShelf: ObservableObject {
 
     func remove(_ item: TemporaryFileShelfItem) {
         items.removeAll { $0.id == item.id }
-        statusMessage = items.isEmpty
-            ? "DROP FILES HERE · COPIES EXPIRE IN 1 HOUR"
-            : "TEMPORARY COPY REMOVED"
+        statusMessage = items.isEmpty ? idleStatusMessage : "TEMPORARY COPY REMOVED"
         scheduleExpirationTimer()
 
         let containerURL = item.containerURL
@@ -163,7 +199,7 @@ final class TemporaryFileShelf: ObservableObject {
         items = []
 
         // A normal quit clears the shelf immediately. A forced termination may
-        // leave copies behind, so init also removes anything older than one hour.
+        // leave copies behind, so init also sweeps anything past its deadline.
         let destinationRoot = rootDirectory
         workQueue.sync {
             try? FileManager.default.removeItem(at: destinationRoot)
@@ -216,7 +252,7 @@ final class TemporaryFileShelf: ObservableObject {
             }
 
             let createdAt = values.contentModificationDate ?? .distantPast
-            let expiresAt = createdAt.addingTimeInterval(Self.lifetime)
+            let expiresAt = createdAt.addingTimeInterval(lifetime)
             guard expiresAt > now else {
                 try? fileManager.removeItem(at: containerURL)
                 continue
@@ -272,7 +308,7 @@ final class TemporaryFileShelf: ObservableObject {
                 guard let self else { return }
                 self.reloadItems()
                 self.statusMessage = self.items.isEmpty
-                    ? "DROP FILES HERE · COPIES EXPIRE IN 1 HOUR"
+                    ? self.idleStatusMessage
                     : "EXPIRED FILES REMOVED"
             }
         }

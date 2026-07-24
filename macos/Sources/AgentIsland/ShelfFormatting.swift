@@ -28,3 +28,13 @@ func shelfTypeLabel(for url: URL) -> String {
     guard !fileExtension.isEmpty else { return "FILE" }
     return String(fileExtension.prefix(maximumTypeBadgeLength))
 }
+
+/// Retention window spelled out for the shelf's status line: "1 HOUR", "24 HOURS".
+func shelfRetentionLabel(hours: Int) -> String {
+    hours == 1 ? "1 HOUR" : "\(hours) HOURS"
+}
+
+/// Retention window for the settings preset buttons, where space is tight: "4H".
+func shelfRetentionShortLabel(hours: Int) -> String {
+    "\(hours)H"
+}

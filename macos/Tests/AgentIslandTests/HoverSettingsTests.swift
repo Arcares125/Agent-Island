@@ -17,6 +17,30 @@ final class HoverSettingsTests: XCTestCase {
         let model = IslandModel(defaults: makeDefaults())
         XCTAssertEqual(model.hoverOpenDelay, 0, accuracy: 0.0001)
         XCTAssertEqual(model.hoverCloseDelay, 0.6, accuracy: 0.0001)
+        XCTAssertEqual(model.shelfRetentionHours, 1)
+    }
+
+    @MainActor
+    func testShelfRetentionPersistsAndReachesTheShelf() {
+        let defaults = makeDefaults()
+        let model = IslandModel(defaults: defaults)
+        model.setShelfRetentionHours(24)
+        XCTAssertEqual(model.temporaryFileShelf.retentionHours, 24)
+
+        let reloaded = IslandModel(defaults: defaults)
+        XCTAssertEqual(reloaded.shelfRetentionHours, 24)
+        // The shelf must come up already on 24h: its init sweeps expired copies,
+        // so starting at the 1-hour default would delete files it should keep.
+        XCTAssertEqual(reloaded.temporaryFileShelf.retentionHours, 24)
+    }
+
+    @MainActor
+    func testHandEditedShelfRetentionFallsBackToDefault() {
+        let defaults = makeDefaults()
+        defaults.set(999, forKey: IslandModel.shelfRetentionHoursKey)
+        let model = IslandModel(defaults: defaults)
+        XCTAssertEqual(model.shelfRetentionHours, 1)
+        XCTAssertEqual(model.temporaryFileShelf.retentionHours, 1)
     }
 
     @MainActor
@@ -87,19 +111,16 @@ final class HoverSettingsTests: XCTestCase {
         )
     }
 
-    /// The idle gear belongs to the resting state only — with a live session the
-    /// dashboard owns settings through its tab, so the gear panel must stay shut.
+    /// Settings is reached through the tab bar in both states now, so the tabbed
+    /// dashboard has to be the surface whether or not a session is running.
     @MainActor
-    func testIdleSettingsStaysHiddenWhileSessionsRun() {
+    func testTabDashboardHostsSettingsWithAndWithoutSessions() {
         let model = IslandModel(defaults: makeDefaults())
-        model.apply(thinkingSessionSnapshot())
-        model.setHovered(true)
+        model.setPhase(.idle)
+        XCTAssertTrue(model.showsTabDashboard, "Resting must still reach the tabs")
 
-        model.toggleIdleSettings()
-        XCTAssertFalse(
-            model.isShowingIdleSettings,
-            "A running session is not the no-session idle state the gear lives in"
-        )
+        model.apply(thinkingSessionSnapshot())
+        XCTAssertTrue(model.showsTabDashboard)
     }
 
     @MainActor

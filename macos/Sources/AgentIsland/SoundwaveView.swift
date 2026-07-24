@@ -27,9 +27,14 @@ struct SoundwaveView: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     private static let barCount = 5
-    /// Slightly see-through so the bars read as a soft accent rather than a bold
-    /// block against the notch.
-    private static let barOpacity: Double = 0.62
+    /// How far around the hue wheel the sweep travels from one end of the set to
+    /// the other. Narrow on purpose: neighbouring hues read as one gradient, while
+    /// a wide span turns the bars back into a rainbow of separate colours.
+    private static let hueSpan = 0.11
+    /// The sweep also ramps in weight, which is what makes it read as a gradient
+    /// rather than a flat tint: the leading end sits back, the trailing end pops.
+    private static let dimStop = (saturation: 0.52, brightness: 0.68, opacity: 0.55)
+    private static let vividStop = (saturation: 0.88, brightness: 1.0, opacity: 0.95)
 
     private var contentWidth: CGFloat {
         CGFloat(Self.barCount) * barWidth + CGFloat(Self.barCount - 1) * spacing
@@ -42,6 +47,10 @@ struct SoundwaveView: View {
         TimelineView(.animation(minimumInterval: 1.0 / 20.0, paused: !animates)) { timeline in
             let hue0 = animates ? huePhase(at: timeline.date.timeIntervalSinceReferenceDate, speed: 0.06) : 0
             Canvas(opaque: false, rendersAsynchronously: false) { context, size in
+                // All five bars are one path filled with one gradient, so the sweep
+                // runs *across the set* instead of each bar taking its own colour.
+                // It also drops the fill count from five to one.
+                var bars = Path()
                 for i in 0..<Self.barCount {
                     let height = barHeight(i)
                     let rect = CGRect(
@@ -50,11 +59,19 @@ struct SoundwaveView: View {
                         width: barWidth,
                         height: height
                     )
-                    context.fill(
-                        Path(roundedRect: rect, cornerRadius: barWidth / 2),
-                        with: .color(color(for: i, hue0: hue0).opacity(Self.barOpacity))
+                    bars.addRoundedRect(
+                        in: rect,
+                        cornerSize: CGSize(width: barWidth / 2, height: barWidth / 2)
                     )
                 }
+                context.fill(
+                    bars,
+                    with: .linearGradient(
+                        sweep(hue0: hue0),
+                        startPoint: CGPoint(x: 0, y: size.height / 2),
+                        endPoint: CGPoint(x: size.width, y: size.height / 2)
+                    )
+                )
             }
             .frame(width: contentWidth, height: maxBarHeight)
         }
@@ -67,10 +84,21 @@ struct SoundwaveView: View {
         return barWidth + v * (maxBarHeight - barWidth)
     }
 
-    /// Chromatic spread: the 5 bars fan across the full hue wheel (a rainbow),
-    /// and the whole rainbow slowly rotates via `hue0` ("rotating changing color").
-    private func color(for i: Int, hue0: Double) -> Color {
-        let hue = (hue0 + Double(i) / Double(Self.barCount)).truncatingRemainder(dividingBy: 1.0)
-        return Color(hue: hue, saturation: 0.68, brightness: 1.0)
+    /// The horizontal sweep: two neighbouring hues, the second brighter and more
+    /// opaque than the first. `hue0` drifts the whole band around the wheel over
+    /// time, so the gradient keeps the "rotating changing colour" behaviour.
+    private func sweep(hue0: Double) -> Gradient {
+        Gradient(colors: [
+            Color(
+                hue: hue0,
+                saturation: Self.dimStop.saturation,
+                brightness: Self.dimStop.brightness
+            ).opacity(Self.dimStop.opacity),
+            Color(
+                hue: (hue0 + Self.hueSpan).truncatingRemainder(dividingBy: 1.0),
+                saturation: Self.vividStop.saturation,
+                brightness: Self.vividStop.brightness
+            ).opacity(Self.vividStop.opacity),
+        ])
     }
 }

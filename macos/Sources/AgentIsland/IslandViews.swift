@@ -22,6 +22,29 @@ enum IslandPalette {
     static let secondary = Color(hex: 0x858A81)
 }
 
+/// The user's uploaded mascot art, if any, plus the revision that invalidates the
+/// sprite cache when an upload is replaced or reset.
+struct MascotArtwork: Equatable {
+    var customURLs: [AgentProvider: URL] = [:]
+    var revision = 0
+
+    func customURL(for provider: AgentProvider) -> URL? { customURLs[provider] }
+}
+
+private struct MascotArtworkKey: EnvironmentKey {
+    static let defaultValue = MascotArtwork()
+}
+
+extension EnvironmentValues {
+    /// Carried through the environment because mascots are drawn from a dozen
+    /// places nested several structs deep, and reading it here is also what makes
+    /// SwiftUI redraw them the moment an upload lands.
+    var mascotArtwork: MascotArtwork {
+        get { self[MascotArtworkKey.self] }
+        set { self[MascotArtworkKey.self] = newValue }
+    }
+}
+
 private struct IslandSurfaceShape: Shape {
     let isNotchAttached: Bool
 
@@ -75,6 +98,7 @@ struct IslandRootView: View {
         .contentShape(Rectangle())
         .accessibilityElement(children: .contain)
         .accessibilityLabel("\(model.provider.displayName), \(model.aggregatePhase.label.lowercased())")
+        .environment(\.mascotArtwork, model.mascotArtwork)
     }
 }
 
@@ -107,6 +131,10 @@ struct IslandHeaderView: View {
                     .opacity(model.isExpanded && !model.isNotchAttached ? 1 : 0)
             }
             .animation(nil, value: model.isExpanded)
+            // The header is hosted in its own view tree, so the artwork has to be
+            // injected here as well as at the body's root — the notch mascots are
+            // drawn from this tree and would otherwise fall back to the bundled art.
+            .environment(\.mascotArtwork, model.mascotArtwork)
     }
 }
 
@@ -279,7 +307,14 @@ private struct CompactCalendarControl: View {
 
     var body: some View {
         Group {
-            if sessionCount > 0 {
+            if model.isShowingSoundwaveWing {
+                // The clock rides along only when the island is open. Collapsed, the
+                // wing is 76–96pt and the two together overflow it — which is what
+                // squeezed the bars down to an unreadable 11pt in the first place.
+                TimelineView(.periodic(from: .now, by: 60)) { timeline in
+                    soundwaveButton(date: timeline.date, showsClock: model.isExpanded)
+                }
+            } else if sessionCount > 0 {
                 // Five seconds is long enough to read either face and wakes the
                 // tiny wing only twelve times per minute—not once per second.
                 TimelineView(.periodic(from: .now, by: IslandCalendar.compactFaceDuration)) { timeline in
@@ -289,42 +324,65 @@ private struct CompactCalendarControl: View {
                             at: timeline.date,
                             sessionCount: sessionCount,
                             calendarPresented: model.isCalendarPresented
-                        ),
-                        showsSoundwave: false
+                        )
                     )
                 }
             } else {
                 TimelineView(.periodic(from: .now, by: 60)) { timeline in
-                    calendarButton(
-                        date: timeline.date,
-                        showsSession: false,
-                        showsSoundwave: model.isShowingSoundwave
-                    )
+                    calendarButton(date: timeline.date, showsSession: false)
                 }
             }
         }
     }
 
+    /// While audio plays the equalizer owns the wing. Collapsed it stands alone —
+    /// the macOS menu bar already shows the time, and the button still opens the
+    /// calendar, so nothing is actually lost at the size where room is scarce.
+    private func soundwaveButton(date: Date, showsClock: Bool) -> some View {
+        Button {
+            model.toggleCalendar()
+        } label: {
+            HStack(spacing: 6) {
+                SoundwaveView(
+                    store: model.spectrumStore,
+                    isActive: model.animationsEnabled,
+                    barWidth: 3,
+                    spacing: 2.4,
+                    maxBarHeight: 16
+                )
+
+                if showsClock {
+                    VStack(alignment: .leading, spacing: -1) {
+                        Text(IslandCalendar.compactDate(date))
+                            .font(.system(size: 7.5, weight: .semibold, design: .rounded))
+                            .foregroundStyle(IslandPalette.secondary)
+                        Text(IslandCalendar.compactTime(date))
+                            .font(.system(size: 9, weight: .semibold, design: .monospaced))
+                            .foregroundStyle(IslandPalette.text.opacity(0.9))
+                            .monospacedDigit()
+                    }
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.8)
+                    .transition(.opacity)
+                }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .transition(.opacity)
+        .help("Now playing · click for the calendar")
+        .accessibilityLabel("Audio playing")
+    }
+
     private func calendarButton(
         date: Date,
-        showsSession: Bool,
-        showsSoundwave: Bool
+        showsSession: Bool
     ) -> some View {
         Button {
             model.toggleCalendar()
         } label: {
             HStack(spacing: 4) {
-                if showsSoundwave {
-                    SoundwaveView(
-                        store: model.spectrumStore,
-                        isActive: model.animationsEnabled && model.isShowingSoundwave,
-                        barWidth: 1.4,
-                        spacing: 1.1,
-                        maxBarHeight: 10
-                    )
-                    .transition(.opacity.combined(with: .scale(scale: 0.9)))
-                }
-
                 if showsSession {
                     HStack(spacing: 4) {
                         Circle()
@@ -390,6 +448,8 @@ private struct NotchRecentAgentCluster: View {
     let fallbackPhase: AgentPhase
     let isActive: Bool
 
+    @Environment(\.mascotArtwork) private var artwork
+
     var body: some View {
         if sessions.isEmpty {
             // No agent detected: show both mascots resting side by side so the
@@ -429,7 +489,8 @@ private struct NotchRecentAgentCluster: View {
                         } else {
                             Image(nsImage: MascotImageStore.image(
                                 provider: session.provider,
-                                fallbackSize: index == 1 ? 14 : 12
+                                fallbackSize: index == 1 ? 14 : 12,
+                                artwork: artwork
                             ))
                             .resizable()
                             .scaledToFit()
@@ -524,6 +585,8 @@ private struct SessionMascotCluster: View {
     let phase: AgentPhase
     let isActive: Bool
 
+    @Environment(\.mascotArtwork) private var artwork
+
     var body: some View {
         let visibleSessions = Array(sessions.prefix(3))
         ZStack(alignment: .leading) {
@@ -539,7 +602,7 @@ private struct SessionMascotCluster: View {
                             showsExpression: true
                         )
                     } else {
-                        Image(nsImage: MascotImageStore.image(provider: session.provider, fallbackSize: 20))
+                        Image(nsImage: MascotImageStore.image(provider: session.provider, fallbackSize: 20, artwork: artwork))
                             .resizable()
                             .scaledToFit()
                             .frame(width: 20, height: 20)
@@ -574,7 +637,7 @@ struct ExpandedIslandView: View {
                     direction: model.volumeTugDirection,
                     isActive: model.animationsEnabled
                 )
-            } else if model.monitoringEnabled, !model.sessions.isEmpty {
+            } else if model.showsTabDashboard {
                 LiveSessionDashboard(model: model)
             } else {
                 VStack(spacing: 0) {
@@ -584,7 +647,9 @@ struct ExpandedIslandView: View {
 
                     switch model.phase {
                     case .idle:
-                        IdleDetailView(model: model)
+                        // An idle island routes to the dashboard above, so this is
+                        // only a fallback if that ever stops being true.
+                        RestingSceneView(model: model)
                     case .thinking:
                         ThinkingDetailView(model: model)
                     case .question:
@@ -686,6 +751,15 @@ private struct AgentsTab: View {
     @ObservedObject var model: IslandModel
 
     var body: some View {
+        if model.sessions.isEmpty {
+            RestingSceneView(model: model)
+                .frame(height: model.liveSessionListHeight)
+        } else {
+            sessionList
+        }
+    }
+
+    private var sessionList: some View {
         ScrollView(.vertical) {
             LazyVStack(spacing: 6) {
                 ForEach(model.sessions) { session in
@@ -709,6 +783,59 @@ private struct AgentsTab: View {
         }
         .scrollIndicators(.visible)
         .frame(height: model.liveSessionListHeight)
+    }
+}
+
+/// The stock `.switch` style paints an off switch in system grey, which on this
+/// dark surface reads as "control is disabled" rather than "setting is off". Here
+/// each state gets its own colour, so on/off is answerable at a glance without
+/// hunting for the knob.
+private struct IslandSwitchToggleStyle: ToggleStyle {
+    static let on = Color(hex: 0x4FB477)
+    static let off = Color(hex: 0xC2544B)
+
+    func makeBody(configuration: Configuration) -> some View {
+        Button {
+            configuration.isOn.toggle()
+        } label: {
+            HStack(spacing: 8) {
+                configuration.label
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                SwitchTrack(isOn: configuration.isOn)
+            }
+            // The label joins the hit area — a 26pt switch is a small target for
+            // the whole row to depend on.
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityAddTraits(configuration.isOn ? .isSelected : [])
+    }
+
+    private struct SwitchTrack: View {
+        let isOn: Bool
+
+        @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+        private static let trackWidth: CGFloat = 26
+        private static let trackHeight: CGFloat = 15
+        private static let knobInset: CGFloat = 2
+
+        var body: some View {
+            let knobSize = Self.trackHeight - Self.knobInset * 2
+            Capsule()
+                .fill(isOn ? IslandSwitchToggleStyle.on : IslandSwitchToggleStyle.off)
+                .frame(width: Self.trackWidth, height: Self.trackHeight)
+                .overlay(alignment: isOn ? .trailing : .leading) {
+                    Circle()
+                        .fill(Color.white)
+                        .frame(width: knobSize, height: knobSize)
+                        .padding(.horizontal, Self.knobInset)
+                }
+                .animation(
+                    reduceMotion ? nil : .spring(response: 0.24, dampingFraction: 0.82),
+                    value: isOn
+                )
+        }
     }
 }
 
@@ -770,9 +897,7 @@ private struct HoverSettingsPanel: View {
                     .font(.system(size: 9, weight: .semibold, design: .monospaced))
                     .foregroundStyle(IslandPalette.text.opacity(0.82))
             }
-            .toggleStyle(.switch)
-            .tint(Color(hex: model.accentHex))
-            .controlSize(.mini)
+            .toggleStyle(IslandSwitchToggleStyle())
 
             Toggle(isOn: Binding(
                 get: { model.musicVisualizerEnabled },
@@ -787,9 +912,7 @@ private struct HoverSettingsPanel: View {
                         .foregroundStyle(IslandPalette.secondary)
                 }
             }
-            .toggleStyle(.switch)
-            .tint(Color(hex: model.accentHex))
-            .controlSize(.mini)
+            .toggleStyle(IslandSwitchToggleStyle())
 
             Toggle(isOn: Binding(
                 get: { model.answerHookEnabled },
@@ -809,9 +932,7 @@ private struct HoverSettingsPanel: View {
                         .fixedSize(horizontal: false, vertical: true)
                 }
             }
-            .toggleStyle(.switch)
-            .tint(Color(hex: model.accentHex))
-            .controlSize(.mini)
+            .toggleStyle(IslandSwitchToggleStyle())
             .help("Lets you answer an agent's question by clicking it here instead of switching to the terminal")
 
             Toggle(isOn: Binding(
@@ -832,14 +953,142 @@ private struct HoverSettingsPanel: View {
                         .fixedSize(horizontal: false, vertical: true)
                 }
             }
-            .toggleStyle(.switch)
-            .tint(Color(hex: model.accentHex))
-            .controlSize(.mini)
+            .toggleStyle(IslandSwitchToggleStyle())
             .help("Stops macOS drawing its own volume overlay on top of the island's")
+
+            Text("MASCOT")
+                .font(.system(size: 8, weight: .bold, design: .monospaced))
+                .tracking(0.6)
+                .foregroundStyle(IslandPalette.secondary)
+                .padding(.top, 2)
+
+            ForEach(AgentProvider.allCases) { provider in
+                mascotRow(for: provider)
+            }
+
+            Text(model.customMascots.statusMessage ?? "transparent PNG works best · each agent keeps its own")
+                .font(.system(size: 7.5, weight: .medium, design: .monospaced))
+                .foregroundStyle(IslandPalette.secondary)
+                .lineLimit(2)
+                .fixedSize(horizontal: false, vertical: true)
+
+            Text("FILE SHELF")
+                .font(.system(size: 8, weight: .bold, design: .monospaced))
+                .tracking(0.6)
+                .foregroundStyle(IslandPalette.secondary)
+                .padding(.top, 2)
+
+            retentionRow
+
+            Text("shortening this deletes copies already past the new limit")
+                .font(.system(size: 7.5, weight: .medium, design: .monospaced))
+                .foregroundStyle(IslandPalette.secondary)
+                .lineLimit(2)
+                .fixedSize(horizontal: false, vertical: true)
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 8)
         .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func mascotRow(for provider: AgentProvider) -> some View {
+        let hasCustom = model.customMascots.hasCustomImage(for: provider)
+        return HStack(spacing: 6) {
+            Image(nsImage: MascotImageStore.image(
+                provider: provider,
+                fallbackSize: 20,
+                artwork: model.mascotArtwork
+            ))
+            .interpolation(hasCustom ? .high : .none)
+            .resizable()
+            .scaledToFit()
+            .frame(width: 20, height: 20)
+
+            Text(provider.displayName.uppercased())
+                .font(.system(size: 9, weight: .semibold, design: .monospaced))
+                .foregroundStyle(IslandPalette.text.opacity(0.82))
+                .frame(width: 46, alignment: .leading)
+
+            Button {
+                chooseImage(for: provider)
+            } label: {
+                Text(hasCustom ? "REPLACE" : "UPLOAD")
+                    .font(.system(size: 9, weight: .semibold, design: .monospaced))
+                    .foregroundStyle(IslandPalette.text.opacity(0.82))
+                    .frame(maxWidth: .infinity, minHeight: 20)
+                    .overlay {
+                        RoundedRectangle(cornerRadius: 6, style: .continuous)
+                            .stroke(IslandPalette.line)
+                    }
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .help("Choose an image to use as the \(provider.displayName) mascot")
+
+            if hasCustom {
+                Button {
+                    model.customMascots.reset(provider)
+                } label: {
+                    Text("RESET")
+                        .font(.system(size: 9, weight: .semibold, design: .monospaced))
+                        .foregroundStyle(IslandPalette.secondary)
+                        .frame(width: 48, height: 20)
+                        .overlay {
+                            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                                .stroke(IslandPalette.line)
+                        }
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .help("Go back to the built-in \(provider.displayName) sprite")
+            }
+        }
+    }
+
+    /// Runs the open panel and hands the pick to the store, which is what does the
+    /// validating — the panel's file-type filter is a convenience, not a guarantee.
+    private func chooseImage(for provider: AgentProvider) {
+        let panel = NSOpenPanel()
+        panel.allowedContentTypes = CustomMascotStore.allowedContentTypes
+        panel.allowsMultipleSelection = false
+        panel.canChooseDirectories = false
+        panel.canChooseFiles = true
+        panel.prompt = "Use as mascot"
+        panel.message = "Choose an image for the \(provider.displayName) mascot"
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        model.customMascots.importImage(from: url, for: provider)
+    }
+
+    private var retentionRow: some View {
+        HStack(spacing: 5) {
+            Text("KEEP")
+                .font(.system(size: 8, weight: .bold, design: .monospaced))
+                .foregroundStyle(IslandPalette.secondary)
+                .frame(width: 34, alignment: .leading)
+
+            ForEach(TemporaryFileShelf.retentionHourPresets, id: \.self) { hours in
+                let isSelected = hours == model.shelfRetentionHours
+                Button {
+                    model.setShelfRetentionHours(hours)
+                } label: {
+                    Text(shelfRetentionShortLabel(hours: hours))
+                        .font(.system(size: 9, weight: .semibold, design: .monospaced))
+                        .foregroundStyle(
+                            isSelected ? IslandPalette.surface : IslandPalette.text.opacity(0.82)
+                        )
+                        .frame(maxWidth: .infinity, minHeight: 20)
+                        .background(isSelected ? Color(hex: model.accentHex) : IslandPalette.surface)
+                        .overlay {
+                            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                                .stroke(isSelected ? Color.clear : IslandPalette.line)
+                        }
+                        .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .help("Temporary copies expire \(shelfRetentionLabel(hours: hours).lowercased()) after they are dropped")
+            }
+        }
     }
 
     private func delayRow(
@@ -1785,36 +2034,13 @@ private struct ActivityLogRow: View {
     }
 }
 
-private struct IdleDetailView: View {
+/// The Agents tab with nothing running. It used to be a separate panel reached
+/// past the tab bar, which left the shelf and the settings unreachable while the
+/// island rested; now it is simply this tab's empty state.
+private struct RestingSceneView: View {
     @ObservedObject var model: IslandModel
 
     var body: some View {
-        ZStack(alignment: .topTrailing) {
-            if model.isShowingIdleSettings {
-                IdleSettingsView(model: model)
-            } else {
-                restingScene
-            }
-
-            // The gear stands in for the whole tab bar here: with nothing running
-            // there is no dashboard to tab through, only the scene and settings.
-            Button(action: model.toggleIdleSettings) {
-                Image(systemName: model.isShowingIdleSettings ? "xmark" : "gearshape.fill")
-                    .font(.system(size: 10, weight: .semibold))
-                    .foregroundStyle(IslandPalette.secondary)
-                    .frame(width: 24, height: 24)
-                    .background(IslandPalette.raised)
-                    .clipShape(Circle())
-                    .overlay { Circle().stroke(IslandPalette.line) }
-                    .contentShape(Circle())
-            }
-            .buttonStyle(.plain)
-            .help(model.isShowingIdleSettings ? "Close settings" : "Settings")
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-    }
-
-    private var restingScene: some View {
         VStack(spacing: 8) {
             IdlePlaygroundView(isActive: model.animationsEnabled)
 
@@ -1872,6 +2098,8 @@ private struct IdleSceneStage: View {
     let scene: IdleScene
     let animates: Bool
 
+    @Environment(\.mascotArtwork) private var artwork
+
     private static let mascotSize: CGFloat = 52
     private static let baseOffset: CGFloat = 30
 
@@ -1898,7 +2126,7 @@ private struct IdleSceneStage: View {
         let providerScale: CGFloat = provider == .claude ? 0.82 : 1
 
         return ZStack(alignment: .topTrailing) {
-            Image(nsImage: MascotImageStore.image(provider: provider, fallbackSize: Self.mascotSize))
+            Image(nsImage: MascotImageStore.image(provider: provider, fallbackSize: Self.mascotSize, artwork: artwork))
                 .interpolation(.none)
                 .resizable()
                 .scaledToFit()
@@ -1960,23 +2188,6 @@ private struct IdleSceneStage: View {
 }
 
 /// The idle panel's settings, reached from the corner gear instead of a tab.
-private struct IdleSettingsView: View {
-    @ObservedObject var model: IslandModel
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text("SETTINGS")
-                .font(.system(size: 8, weight: .bold, design: .monospaced))
-                .tracking(0.9)
-                .foregroundStyle(IslandPalette.secondary)
-
-            HoverSettingsPanel(model: model)
-                .frame(height: IslandModel.settingsTabContentHeight)
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-    }
-}
-
 private struct QuestionDetailView: View {
     @ObservedObject var model: IslandModel
 
@@ -2174,10 +2385,25 @@ private struct IslandButton: View {
 private enum MascotImageStore {
     static let cache = NSCache<NSString, NSImage>()
 
-    static func image(provider: AgentProvider, fallbackSize: CGFloat) -> NSImage {
-        let key = "\(provider.assetName)@\(provider.pixelCells)" as NSString
+    static func image(
+        provider: AgentProvider,
+        fallbackSize: CGFloat,
+        artwork: MascotArtwork = MascotArtwork()
+    ) -> NSImage {
+        let custom = artwork.customURL(for: provider)
+        // The revision is part of the key so replacing an upload cannot serve the
+        // previous sprite back out of the cache.
+        let key = "\(provider.assetName)@\(provider.pixelCells)#\(custom?.path ?? "bundled")#\(artwork.revision)" as NSString
         if let cached = cache.object(forKey: key) {
             return cached
+        }
+
+        if let custom, let uploaded = NSImage(contentsOf: custom) {
+            // Uploads are shown as they were provided. The bundled sprites get the
+            // pixel treatment because they are drawn for it; forcing a user's own
+            // artwork onto a 26-cell grid would just wreck it.
+            cache.setObject(uploaded, forKey: key)
+            return uploaded
         }
 
         guard let url = Bundle.module.url(forResource: provider.assetName, withExtension: "png"),
@@ -2233,6 +2459,7 @@ struct MascotView: View {
     let isActive: Bool
     let showsExpression: Bool
 
+    @Environment(\.mascotArtwork) private var artwork
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var pose = 0
 
@@ -2241,7 +2468,7 @@ struct MascotView: View {
     }
 
     private var image: NSImage {
-        MascotImageStore.image(provider: provider, fallbackSize: size)
+        MascotImageStore.image(provider: provider, fallbackSize: size, artwork: artwork)
     }
 
     private var transform: (offset: CGSize, rotation: Double, scaleX: CGFloat, scaleY: CGFloat) {

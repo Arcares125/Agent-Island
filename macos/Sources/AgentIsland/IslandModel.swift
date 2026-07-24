@@ -316,6 +316,8 @@ final class IslandModel: ObservableObject {
     // grant it deliberately, for a cosmetic win, or not at all.
     static let suppressSystemVolumeHUDKey = "suppressSystemVolumeHUD"
     static let defaultSuppressSystemVolumeHUD = false
+    // How long the file shelf keeps its temporary copies, in hours.
+    static let shelfRetentionHoursKey = "shelfRetentionHours"
     /// Body height reserved for the volume HUD *below* the always-overlaid compact
     /// header — covers the "VOLUME" label, the mascot/bar row, the percent readout,
     /// and ExpandedIslandView's HUD padding, with margin.
@@ -323,8 +325,13 @@ final class IslandModel: ObservableObject {
     /// Fixed content heights for the non-list tabs, kept in sync with the tab
     /// views' own frames. The Agents tab sizes to its session list instead.
     static let shelfTabContentHeight: CGFloat = 114
-    static let settingsTabContentHeight: CGFloat = 228
+    // Grown from 228 when the mascot and file-shelf rows landed; the panel still
+    // scrolls, this just keeps the common case from starting out scrolled.
+    static let settingsTabContentHeight: CGFloat = 300
     static let soundwaveStripHeight: CGFloat = 34
+    /// Room for the resting scene the Agents tab shows when nothing is running:
+    /// the mascot playground plus its two caption lines.
+    static let restingSceneHeight: CGFloat = 150
     /// The calendar owns the body below the persistent notch header. Keeping this
     /// fixed prevents a six-week month from growing the island or leaving a short
     /// month with a large empty tail.
@@ -332,10 +339,37 @@ final class IslandModel: ObservableObject {
 
     private let defaults: UserDefaults
 
-    let temporaryFileShelf = TemporaryFileShelf()
+    let temporaryFileShelf: TemporaryFileShelf
+    let customMascots: CustomMascotStore
+    /// The store is its own observable, so its changes are forwarded here — every
+    /// mascot in the island is drawn by a view bound to the model, not to the store.
+    private var mascotObserver: AnyCancellable?
 
-    init(defaults: UserDefaults = .standard) {
+    /// Snapshot of the uploaded artwork for the view environment.
+    var mascotArtwork: MascotArtwork {
+        MascotArtwork(customURLs: customMascots.customURLs, revision: customMascots.revision)
+    }
+
+    /// `customMascots` is injectable so tests never touch the real Application
+    /// Support directory — the store writes there, and a test that reads it would
+    /// both depend on and damage the user's own uploads.
+    init(
+        defaults: UserDefaults = .standard,
+        customMascots: CustomMascotStore? = nil
+    ) {
         self.defaults = defaults
+        // Built here rather than as a default argument: the store is main-actor
+        // isolated, and default arguments are evaluated outside that isolation.
+        self.customMascots = customMascots ?? CustomMascotStore()
+        // Read before the shelf is built: its init sweeps expired copies, so a
+        // shelf that started on the 1-hour default would delete a 24-hour user's
+        // files a moment before the saved setting could be applied.
+        let savedRetentionHours = defaults.object(forKey: Self.shelfRetentionHoursKey) != nil
+            ? TemporaryFileShelf.clampRetentionHours(
+                defaults.integer(forKey: Self.shelfRetentionHoursKey))
+            : TemporaryFileShelf.defaultRetentionHours
+        self.shelfRetentionHours = savedRetentionHours
+        self.temporaryFileShelf = TemporaryFileShelf(retentionHours: savedRetentionHours)
         if defaults.object(forKey: Self.hoverOpenDelayKey) != nil {
             hoverOpenDelay = defaults.double(forKey: Self.hoverOpenDelayKey)
         }
@@ -354,6 +388,9 @@ final class IslandModel: ObservableObject {
         if let savedNotes = defaults.dictionary(forKey: Self.calendarEventNotesKey)
             as? [String: String] {
             calendarEventNotes = savedNotes
+        }
+        mascotObserver = self.customMascots.objectWillChange.sink { [weak self] _ in
+            self?.objectWillChange.send()
         }
         // The agents' config files are the source of truth, not our default:
         // the user may have removed the hook by hand since last launch.
@@ -384,6 +421,10 @@ final class IslandModel: ObservableObject {
     @Published var musicVisualizerEnabled: Bool = IslandModel.defaultMusicVisualizerEnabled {
         didSet { defaults.set(musicVisualizerEnabled, forKey: Self.musicVisualizerEnabledKey) }
     }
+
+    @Published private(set) var shelfRetentionHours: Int {
+        didSet { defaults.set(shelfRetentionHours, forKey: Self.shelfRetentionHoursKey) }
+    }
     /// Mirrors what is actually in the agents' config files, not a preference we
     /// hold independently of them.
     @Published private(set) var answerHookEnabled = IslandModel.defaultAnswerHookEnabled
@@ -412,10 +453,6 @@ final class IslandModel: ObservableObject {
         didSet { defaults.set(hoverCloseDelay, forKey: Self.hoverCloseDelayKey) }
     }
     @Published var isVisible = true
-    /// Whether the idle/no-session panel is showing its settings instead of the
-    /// resting scene. Reached from the gear in the corner rather than a tab, since
-    /// there is no tab bar when nothing is running.
-    @Published private(set) var showsIdleSettings = false
     @Published private(set) var animationsEnabled = true
     @Published var monitoringEnabled = true
     @Published var selectedAnswer = "Guest checkout"
@@ -503,44 +540,48 @@ final class IslandModel: ObservableObject {
         musicVisualizerEnabled && isAudioPlaying
     }
 
-    /// On a notch Mac the equalizer lives beside the steady idle clock. During
-    /// active sessions the wing alternates session count and time instead.
-    /// Without a notch there is no wing, so it falls back to a dashboard strip.
+    /// Without a notch there is no wing to draw into, so the expanded dashboard
+    /// carries a strip instead.
     var isShowingSoundwaveStrip: Bool {
         isShowingSoundwave && !isNotchAttached
     }
 
+    /// On a notch Mac the equalizer lives in the notch itself, which is where it
+    /// belongs: the notch is always on screen, so the bars react to whatever is
+    /// playing without the island having to be open. It takes over the wing for
+    /// as long as audio plays, including while a session runs — the wing's
+    /// session/date faces used to suppress it entirely.
+    var isShowingSoundwaveWing: Bool {
+        isShowingSoundwave && isNotchAttached
+    }
+
     /// The resting home screen: nothing is being tracked and the tracked phase is
-    /// idle. This is the only place the settings gear and the mascot playground
-    /// appear, so both the layout and the views test against it.
+    /// idle. This is where the mascot playground appears, so both the layout and
+    /// the views test against it.
     var isNoSessionIdle: Bool {
         !(monitoringEnabled && !sessions.isEmpty) && phase == .idle
     }
 
-    /// Whether the idle panel is currently swapped to settings. Guarded so a stale
-    /// flag can never grow the panel outside the state the gear lives in.
-    var isShowingIdleSettings: Bool {
-        showsIdleSettings && isExpanded && isNoSessionIdle && !isShowingVolumeHUD
+    /// The tabbed dashboard is the island's main surface — session list, file
+    /// shelf, settings. Resting counts too: the shelf and the settings are most
+    /// useful precisely when no agent is running, and routing the resting state
+    /// here is what makes those two tabs reachable at all.
+    var showsTabDashboard: Bool {
+        (monitoringEnabled && !sessions.isEmpty) || isNoSessionIdle
     }
 
+    /// Whether the idle panel is currently swapped to settings. Guarded so a stale
+    /// flag can never grow the panel outside the state the gear lives in.
     /// Idle panel height when it is showing settings instead of the scene.
     ///
     /// Built from the same pieces the view lays out: the always-overlaid compact
     /// header, ExpandedIslandView's idle padding (14 top + 18 bottom), a settings
     /// title row, and the fixed settings panel — so the panel is never clipped.
-    private var idleSettingsExpandedHeight: CGFloat {
-        persistentHeaderSize.height + 14 + 18 + 20 + Self.settingsTabContentHeight
-    }
-
-    /// The idle panel grows to fit the settings when the gear is open, and stays
-    /// at the compact resting size — room for the mascot scene — otherwise.
-    private var idleExpandedSize: IslandSize {
-        IslandSize(width: 470, height: isShowingIdleSettings ? idleSettingsExpandedHeight : 224)
-    }
-
     var liveSessionListHeight: CGFloat {
         let rowCount = CGFloat(sessions.count)
-        guard rowCount > 0 else { return 0 }
+        // Nothing running: the Agents tab hosts the resting mascot scene, which
+        // still needs a box to play in.
+        guard rowCount > 0 else { return Self.restingSceneHeight }
 
         // A closed dashboard follows its rows instead of reserving a large empty
         // viewport. An open inspector gets the full private scrolling viewport so
@@ -586,6 +627,18 @@ final class IslandModel: ObservableObject {
         )
     }
 
+    /// Sizes for the manually driven preview phases. An idle island always routes
+    /// to the dashboard above, so `.idle` only lands here if that ever changes —
+    /// it follows the dashboard rather than inventing a size of its own.
+    private var expandedDetailSize: IslandSize {
+        switch phase {
+        case .idle: return IslandSize(width: 610, height: liveDashboardHeight)
+        case .thinking: return IslandSize(width: 560, height: 350)
+        case .question: return IslandSize(width: 560, height: 320)
+        case .complete: return IslandSize(width: 560, height: 334)
+        }
+    }
+
     var preferredSize: IslandSize {
         if isShowingVolumeHUD {
             return volumeHUDSize
@@ -595,18 +648,15 @@ final class IslandModel: ObservableObject {
             return calendarExpandedSize
         }
 
+        // The dashboard sizes the same way with or without a notch, so it is
+        // settled before either branch below.
+        if isExpanded, showsTabDashboard {
+            return IslandSize(width: 610, height: liveDashboardHeight)
+        }
+
         if let notchPresentation {
             if isExpanded {
-                if monitoringEnabled, !sessions.isEmpty {
-                    return IslandSize(width: 610, height: liveDashboardHeight)
-                }
-
-                switch phase {
-                case .idle: return idleExpandedSize
-                case .thinking: return IslandSize(width: 560, height: 350)
-                case .question: return IslandSize(width: 560, height: 320)
-                case .complete: return IslandSize(width: 560, height: 334)
-                }
+                return expandedDetailSize
             }
 
             // The compact island stays at its full wing width even when idle so it
@@ -618,18 +668,11 @@ final class IslandModel: ObservableObject {
         }
 
         if monitoringEnabled, !sessions.isEmpty {
-            return isExpanded
-                ? IslandSize(width: 610, height: liveDashboardHeight)
-                : IslandSize(width: 500, height: 56)
+            return IslandSize(width: 500, height: 56)
         }
 
         if isExpanded {
-            switch phase {
-            case .idle: return idleExpandedSize
-            case .thinking: return IslandSize(width: 560, height: 350)
-            case .complete: return IslandSize(width: 560, height: 334)
-            case .question: return IslandSize(width: 560, height: 320)
-            }
+            return expandedDetailSize
         }
 
         // A dismissed question collapses to the compact pill, which still carries
@@ -762,10 +805,6 @@ final class IslandModel: ObservableObject {
         if hovered {
             endQuestionPeek()
             endVolumePeek()
-        } else if !isPinnedOpen {
-            // Collapsing drops the gear panel so the next open shows the scene, not
-            // a settings view the user never returned to.
-            showsIdleSettings = false
         }
         layoutDidChange?()
     }
@@ -854,6 +893,13 @@ final class IslandModel: ObservableObject {
         guard musicVisualizerEnabled != value else { return }
         musicVisualizerEnabled = value
         visualizerEnabledDidChange?(value)
+    }
+
+    func setShelfRetentionHours(_ hours: Int) {
+        let clamped = TemporaryFileShelf.clampRetentionHours(hours)
+        guard clamped != shelfRetentionHours else { return }
+        shelfRetentionHours = clamped
+        temporaryFileShelf.setRetentionHours(clamped)
     }
 
     /// Turn the macOS volume HUD suppression on or off.
@@ -1049,12 +1095,6 @@ final class IslandModel: ObservableObject {
         defaults.set(notes, forKey: Self.calendarEventNotesKey)
     }
 
-    /// Flip the idle panel between the resting scene and settings.
-    func toggleIdleSettings() {
-        showsIdleSettings.toggle()
-        layoutDidChange?()
-    }
-
     func setHoverOpenDelay(_ value: TimeInterval) {
         guard hoverOpenDelay != value else { return }
         hoverOpenDelay = value
@@ -1099,7 +1139,6 @@ final class IslandModel: ObservableObject {
         sessions = snapshot.sessions ?? []
         // Work arriving retires the idle gear panel; it belongs to the resting
         // state only, and the dashboard has its own settings tab.
-        if !sessions.isEmpty { showsIdleSettings = false }
         if let expandedSessionID,
            !sessions.contains(where: { $0.id == expandedSessionID }) {
             self.expandedSessionID = nil

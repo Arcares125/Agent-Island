@@ -50,6 +50,71 @@ final class TemporaryFileShelfTests: XCTestCase {
         XCTAssertEqual(try Data(contentsOf: sourceURL), expectedData)
     }
 
+    // MARK: Retention
+
+    @MainActor
+    func testRetentionDefaultsToOneHourAndDrivesLifetime() {
+        let store = TemporaryFileShelf(rootDirectory: makeShelfDirectory())
+        defer { store.shutdown() }
+
+        XCTAssertEqual(store.retentionHours, 1)
+        XCTAssertEqual(store.lifetime, 3600, accuracy: 0.001)
+        XCTAssertTrue(store.statusMessage.contains("1 HOUR"))
+    }
+
+    @MainActor
+    func testRetentionExtendsToTwentyFourHours() {
+        let store = TemporaryFileShelf(rootDirectory: makeShelfDirectory(), retentionHours: 24)
+        defer { store.shutdown() }
+
+        XCTAssertEqual(store.retentionHours, 24)
+        XCTAssertEqual(store.lifetime, 24 * 3600, accuracy: 0.001)
+        XCTAssertTrue(store.statusMessage.contains("24 HOURS"))
+    }
+
+    /// The value round-trips through UserDefaults, where a user can hand-edit it.
+    @MainActor
+    func testUnknownRetentionFallsBackToDefault() {
+        XCTAssertEqual(TemporaryFileShelf.clampRetentionHours(7), 1)
+        XCTAssertEqual(TemporaryFileShelf.clampRetentionHours(-3), 1)
+        XCTAssertEqual(TemporaryFileShelf.clampRetentionHours(100_000), 1)
+        XCTAssertEqual(TemporaryFileShelf.clampRetentionHours(24), 24)
+    }
+
+    /// A longer window must keep a copy that the previous window would have swept.
+    @MainActor
+    func testLengtheningRetentionKeepsAnAgingCopy() async throws {
+        let fileManager = FileManager.default
+        let shelfDirectory = makeShelfDirectory()
+        let store = TemporaryFileShelf(rootDirectory: shelfDirectory, retentionHours: 24)
+        defer { store.shutdown() }
+
+        let containerURL = shelfDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try fileManager.createDirectory(at: containerURL, withIntermediateDirectories: true)
+        try Data("aged".utf8).write(to: containerURL.appendingPathComponent("aged.txt"))
+        // Three hours old: past a 1-hour window, well inside a 24-hour one.
+        try fileManager.setAttributes(
+            [.modificationDate: Date().addingTimeInterval(-3 * 3600)],
+            ofItemAtPath: containerURL.path
+        )
+
+        store.setRetentionHours(12)
+        XCTAssertEqual(store.items.count, 1, "A 3-hour-old copy survives a 12-hour window")
+
+        store.setRetentionHours(1)
+        XCTAssertTrue(store.items.isEmpty, "…and is swept once the window drops below its age")
+        XCTAssertFalse(fileManager.fileExists(atPath: containerURL.path))
+    }
+
+    @MainActor
+    private func makeShelfDirectory() -> URL {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("AgentIslandTests-\(UUID().uuidString)", isDirectory: true)
+            .appendingPathComponent("shelf", isDirectory: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: url) }
+        return url
+    }
+
     @MainActor
     private func waitUntil(
         timeout: TimeInterval = 3,

@@ -57,20 +57,51 @@ final class SoundwaveTests: XCTestCase {
         XCTAssertFalse(model.isShowingSoundwave, "Nothing to show when nothing is playing")
     }
 
-    /// With a notch the equalizer lives in the notch wing, so the expanded
-    /// dashboard must not also stack a strip.
+    /// The notch hosts the equalizer; the dashboard strip is the no-notch
+    /// fallback. Exactly one of them draws.
     @MainActor
-    func testNotchHostsSoundwaveInsteadOfStrip() {
+    func testNotchHostsTheEqualizerAndStripIsTheFallback() {
         let model = makeModel()
         model.setMusicVisualizerEnabled(true)
         model.audioPlayingDidChange(true)
-        XCTAssertTrue(model.isShowingSoundwaveStrip, "No notch: falls back to the strip")
+        XCTAssertTrue(model.isShowingSoundwaveStrip, "No notch: the strip hosts it")
+        XCTAssertFalse(model.isShowingSoundwaveWing, "No notch means no wing to draw into")
 
         model.setNotchPresentation(
             NotchPresentation(cameraWidth: 180, barHeight: 32, compactWidth: 420))
-        XCTAssertTrue(model.isShowingSoundwave, "Still shown — in the notch wing")
-        XCTAssertFalse(
-            model.isShowingSoundwaveStrip,
-            "Notch wing hosts it, so the dashboard neither draws nor reserves a strip")
+        XCTAssertTrue(model.isShowingSoundwaveWing, "With a notch it lives in the notch")
+        XCTAssertFalse(model.isShowingSoundwaveStrip, "…and the dashboard does not stack a second")
+    }
+
+    /// Regression: the wing used to hide the equalizer whenever a session was
+    /// running, and the notch is exactly where it should keep reacting.
+    @MainActor
+    func testNotchEqualizerSurvivesRunningSessionsAndExpansion() {
+        let model = makeModel()
+        model.setMusicVisualizerEnabled(true)
+        model.audioPlayingDidChange(true)
+        model.setNotchPresentation(
+            NotchPresentation(cameraWidth: 180, barHeight: 32, compactWidth: 420))
+
+        model.isHovered = true
+        XCTAssertTrue(model.isExpanded)
+        XCTAssertTrue(model.isShowingSoundwaveWing, "Opening the island must not hide it")
+
+        model.isHovered = false
+        XCTAssertTrue(model.isShowingSoundwaveWing, "Collapsed is its normal home")
+    }
+
+    /// Silence puts the notch back to its date/session face.
+    @MainActor
+    func testNotchEqualizerYieldsWhenAudioStops() {
+        let model = makeModel()
+        model.setMusicVisualizerEnabled(true)
+        model.setNotchPresentation(
+            NotchPresentation(cameraWidth: 180, barHeight: 32, compactWidth: 420))
+        model.audioPlayingDidChange(true)
+        XCTAssertTrue(model.isShowingSoundwaveWing)
+
+        model.audioPlayingDidChange(false)
+        XCTAssertFalse(model.isShowingSoundwaveWing)
     }
 }
