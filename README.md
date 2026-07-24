@@ -11,7 +11,7 @@
 </p>
 
 <p align="center">
-  macOS 14+ · Native SwiftUI/AppKit · Dependency-free Rust helper · Local-first · Version 2.6.0 (build 60)
+  macOS 14+ · Native SwiftUI/AppKit · Dependency-free Rust helper · Local-first · Version 2.6.1 (build 61)
 </p>
 
 <p align="center">
@@ -866,8 +866,8 @@ Every installed build also increments `CFBundleVersion`.
 Current release:
 
 ```text
-CFBundleShortVersionString = 2.6.0
-CFBundleVersion = 60
+CFBundleShortVersionString = 2.6.1
+CFBundleVersion = 61
 ```
 
 ## Design principles
